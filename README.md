@@ -1,369 +1,276 @@
-# ✈️ TripBuddy — AI Travel Planning Agent
+# ✈️ TripBuddy
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white" />
-  <img src="https://img.shields.io/badge/LangGraph-1C3C3C?style=for-the-badge&logo=langchain&logoColor=white" />
-  <img src="https://img.shields.io/badge/LangChain-1C3C3C?style=for-the-badge&logo=langchain&logoColor=white" />
-  <img src="https://img.shields.io/badge/OpenRouter-6366F1?style=for-the-badge&logo=openai&logoColor=white" />
-  <img src="https://img.shields.io/badge/Tavily-000000?style=for-the-badge&logo=search&logoColor=white" />
-  <img src="https://img.shields.io/badge/Streamlit-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white" />
+  <img src="https://img.shields.io/badge/React-61DAFB?style=for-the-badge&logo=react&logoColor=black" />
+  <img src="https://img.shields.io/badge/TypeScript-3178C6?style=for-the-badge&logo=typescript&logoColor=white" />
+  <img src="https://img.shields.io/badge/Vite-646CFF?style=for-the-badge&logo=vite&logoColor=white" />
+  <img src="https://img.shields.io/badge/Express-000000?style=for-the-badge&logo=express&logoColor=white" />
+  <img src="https://img.shields.io/badge/Gemini-8B5CF6?style=for-the-badge&logo=google&logoColor=white" />
+  <img src="https://img.shields.io/badge/Tavily-111827?style=for-the-badge&logo=tavily&logoColor=white" />
+  <img src="https://img.shields.io/badge/Google%20Maps-4285F4?style=for-the-badge&logo=googlemaps&logoColor=white" />
   <img src="https://img.shields.io/badge/OpenStreetMap-7EBC6F?style=for-the-badge&logo=openstreetmap&logoColor=white" />
-  <img src="https://img.shields.io/badge/Nominatim-7EBC6F?style=for-the-badge&logo=openstreetmap&logoColor=white" />
-  <img src="https://img.shields.io/badge/pytest-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white" />
-  <img src="https://img.shields.io/badge/Git-F05032?style=for-the-badge&logo=git&logoColor=white" />
-  <img src="https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=github&logoColor=white" />
 </p>
 
 **Your friend who actually plans the trip.**
 
-TripBuddy is a personalized, multi-agent AI travel planner that turns a simple natural-language request into a complete travel plan — including flights, accommodation, activities, restaurants, transportation, and a day-by-day itinerary.
+TripBuddy is an AI-powered travel planning assistant that turns a natural-language prompt into a structured trip plan with destination research, itinerary suggestions, hotel and flight context, and an interactive location map.
 
-Built with **LangGraph**, **LangChain**, **OpenRouter**, **Tavily**, **OpenStreetMap**, and **Streamlit**.
+The current app is built with a modern React + Vite frontend and a lightweight Express API layer, using Google Gemini for planning and Tavily for live web grounding.
 
 ---
 
 ## 🎥 Demo
+
 ![Demo](assets/demo.png)
 
 ---
 
-## 🌍 What is TripBuddy?
-Planning a trip usually means jumping between flight websites, hotel platforms, maps, blogs, and dozens of tabs.  
-TripBuddy brings that process into one place.
+## 🌍 What TripBuddy does
 
-Just describe your trip naturally:
+Give it a prompt like:
 
-> *"I want to spend 5 days in Manali starting from Delhi. My budget is ₹15,000. I love photography, nature and cafes, and I hate waking up early."*
+> "I want to spend 5 days in Manali starting from Delhi. My budget is ₹15,000. I love photography, nature and cafés, and I absolutely hate waking up early."
 
-TripBuddy coordinates multiple specialist AI agents to turn that request into a personalized travel plan.
+TripBuddy parses the request into trip details, researches the destination, creates a personalized itinerary, and returns a travel plan with an interactive map and travel metadata.
+
+It can handle:
+
+- destination + origin parsing
+- duration and budget extraction
+- interest and travel-style detection
+- itinerary generation with recommendations, alternatives, and pacing
+- map-based location rendering
+- live grounding from search and geocoding APIs
 
 ---
 
-## 🧠 How It Works
-TripBuddy uses a **LangGraph `StateGraph`** to coordinate several specialized agents.
+## 🧠 How it works
 
-```
-                         USER REQUEST
-                              │
-                              ▼
-                  ┌─────────────────────┐
-                  │    ORCHESTRATOR     │
-                  │                     │
-                  │ Extracts:           │
-                  │ • Destination       │
-                  │ • Duration          │
-                  │ • Budget            │
-                  │ • Interests         │
-                  │ • Origin            │
-                  └──────────┬──────────┘
-                             │
-             ┌───────────────┼───────────────┐
-             ▼               ▼               ▼
-      ┌────────────┐  ┌────────────┐  ┌────────────────┐
-      │   FLIGHT   │  │   HOTEL    │  │   ITINERARY    │
-      │   AGENT    │  │   AGENT    │  │     AGENT      │
-      │            │  │            │  │                │
-      │ Tavily     │  │ Tavily     │  │ Tavily         │
-      │ Search     │  │ Search     │  │ + Nominatim    │
-      └─────┬──────┘  └─────┬──────┘  └───────┬────────┘
-            │               │                  │
-            └───────────────┼──────────────────┘
-                            ▼
-                  ┌─────────────────────┐
-                  │     SYNTHESIZER     │
-                  │                     │
-                  │ Combines all agent  │
-                  │ results into one    │
-                  │ personalized plan   │
-                  └──────────┬──────────┘
-                             │
-                             ▼
-                     ✈️ COMPLETE TRIP
+TripBuddy uses a simple multi-stage planning pipeline:
+
+```text
+User prompt
+   ↓
+Orchestrator / parser
+   ↓
+Flight + hotel + itinerary reasoning
+   ↓
+Grounding via Tavily / Nominatim / Maps
+   ↓
+Final synthesized trip plan
+   ↓
+Rendered in React chat + map UI
 ```
 
-### Agent Responsibilities
+The application currently follows this flow:
 
-| Agent | Responsibility | Tools |
-| :--- | :--- | :--- |
-| 🧠 **Orchestrator** | Understands and extracts trip requirements | Python parsing |
-| ✈️ **Flight Agent** | Finds routes, airlines, prices, and booking information | Tavily |
-| 🏨 **Hotel Agent** | Finds accommodation across different budgets | Tavily |
-| 🗺️ **Itinerary Agent** | Creates the day-by-day travel plan | Tavily + Nominatim |
-| ✨ **Synthesizer** | Combines everything into the final response | LLM |
+1. The frontend collects a trip request and sends it to the API.
+2. The Express server receives the prompt and calls the planner pipeline.
+3. The planner extracts trip details such as destination, budget, origin, interests, and travel style.
+4. Gemini generates structured output using grounded web research.
+5. The result is streamed back to the UI in real time, including plan content and map data.
 
 ---
 
 ## ✨ Features
-* 🧠 **Multi-agent architecture** powered by LangGraph
-* 💬 **Natural-language trip planning**
-* ✈️ **Flight research** with airline, route, and price information
-* 🏨 **Accommodation research** across different budgets
-* 🗺️ **Personalized day-by-day itineraries**
-* 🍜 **Restaurant and food recommendations**
-* 🚆 **Local transportation suggestions**
-* 🔎 **Real-time web research** through Tavily
-* 📍 **Location discovery** through OpenStreetMap/Nominatim
-* 🤖 **Multi-model LLM support** through OpenRouter
-* 🆓 **Free model support** for experimentation and demos
-* 📊 **Budget-aware recommendations**
-* 💻 **Streamlit chat interface**
-* 🔄 **Conversation history**
-* 🗑️ **Clear Trip functionality**
-* ⚡ **Live workflow progress indicators**
+
+- 💬 Natural-language trip planning from a single prompt
+- ✈️ Flight and hotel research context
+- 🗺️ Interactive Google Maps view for destinations and stop points
+- 📍 OpenStreetMap/Nominatim geocoding for destination and origin lookup
+- 🧭 Personalized day-by-day itinerary generation
+- 📊 Budget, duration, and travel-style parsing
+- 🔎 Tavily grounding for real-time web context
+- ⚡ Server-sent events (SSE) for live planning progress
+- 🎙️ Voice input using the browser Web Speech API
+- 🧠 Model-aware planning with Google Gemini fallback paths
+- 🧹 Clear-trip and prompt-reset flows in the UI
 
 ---
 
-## 🤖 Supported Models
-TripBuddy uses **OpenRouter** as its LLM gateway, allowing different models to be selected without changing the application architecture.
-
-Example models configured in the project include:
-* `openai/gpt-oss-20b`
-* `google/gemma-4-31b-it`
-* `openrouter/free`
-* NVIDIA Nemotron models
-* Google Gemini
-* OpenAI models
-* Anthropic Claude
-
-> **Note:** Model availability and free-tier status can change over time. Check OpenRouter for the currently available models.
-
----
-
-## 🛠️ Tech Stack
+## 🛠️ Tech stack
 
 | Layer | Technology |
 | :--- | :--- |
-| Agent orchestration | LangGraph |
-| LLM framework | LangChain |
-| LLM gateway | OpenRouter |
-| Web search | Tavily Search API |
-| Location data | OpenStreetMap / Nominatim |
-| Geocoding | geopy |
-| Frontend | Streamlit |
-| Language | Python |
-| Testing | pytest |
+| Frontend | React + Vite + TypeScript |
+| UI components | Tailwind CSS + Lucide icons |
+| Backend | Express.js |
+| AI inference | Google Gemini (`@google/genai`) |
+| Search grounding | Tavily |
+| Maps | Google Maps JavaScript API |
+| Geocoding | OpenStreetMap / Nominatim |
+| Hosting | Vercel-ready serverless API + local dev server |
 
 ---
 
-## 📁 Project Structure
+## 📁 Project structure
 
 ```text
-Travel_Planner_Agent/
-│
-├── Travel Agent V1/
-│   ├── app.py                    # Streamlit application
-│   ├── config.py                 # LLM/OpenRouter configuration
-│   ├── requirements.txt          # Python dependencies
-│   ├── .env.example              # Environment variable template
-│   │
-│   └── graph/
-│       ├── __init__.py
-│       ├── state.py              # TravelPlanState definition
-│       ├── nodes.py              # Agent node implementations
-│       ├── tools.py              # Tavily + location tools
-│       └── workflow.py           # LangGraph workflow
-│
-├── tests/
-│   ├── test_orchestrator.py      # Orchestrator tests
-│   └── test_workflow.py          # Workflow tests
-│
+trip-buddy/
+├── api/
+│   ├── index.ts
+│   ├── status.ts
+│   ├── plan.ts
+│   └── plan/
+│       ├── planner.ts
+│       └── stream.ts
+├── src/
+│   ├── App.tsx
+│   ├── main.tsx
+│   ├── index.css
+│   ├── types.ts
+│   └── components/
+│       ├── Sidebar.tsx
+│       ├── GoogleMapView.tsx
+│       ├── MockMap.tsx
+│       ├── PlanCard.tsx
+│       ├── ProgressIndicator.tsx
+│       ├── MarkdownRenderer.tsx
+│       └── ExpenseBreakdown.tsx
 ├── assets/
-│   └── demo.png                  # Application screenshot
-│
-├── requirements.txt              # Root dependencies
-├── .env.example                  # Root environment template
+│   └── demo.png
+├── .env.example
+├── .gitignore
+├── index.html
+├── LICENSE
+├── package.json
+├── server.ts
+├── tsconfig.json
+├── vite.config.ts
 ├── README.md
-└── LICENSE
+└── bun.lock
 ```
 
 ---
 
-## 🚀 Getting Started
+## 🚀 Getting started
 
 ### Prerequisites
+
 Make sure you have:
-* Python 3.10+
-* Git
-* An OpenRouter API key
-* A Tavily API key
+
+- Node.js 18+
+- npm or Bun
+- A Google Gemini API key
+- A Tavily API key
+- An optional Google Maps API key for map rendering
 
 ### 1. Clone the repository
+
 ```bash
 git clone https://github.com/aryan6002261/trip-buddy.git
 cd trip-buddy
 ```
 
-### 2. Create a virtual environment
+### 2. Install dependencies
 
-**Windows:**
-```cmd
-python -m venv venv
-venv\Scripts\activate
-```
-
-**macOS / Linux:**
 ```bash
-python3 -m venv venv
-source venv/bin/activate
+npm install
 ```
 
-### 3. Install dependencies
+### 3. Configure environment variables
+
+Copy the example file and fill in your credentials:
+
 ```bash
-pip install -r requirements.txt
+cp .env.example .env
 ```
 
-If you're working specifically inside the V1 directory:
-```bash
-cd "Travel Agent V1"
-pip install -r requirements.txt
-```
-
-### 4. Configure API keys
-Create a `.env` file based on `.env.example`:
+Example `.env`:
 
 ```env
-OPENROUTER_API_KEY=your_openrouter_api_key
-TAVILY_API_KEY=your_tavily_api_key
+GEMINI_API_KEY=your_gemini_api_key_here
+TAVILY_API_KEY=your_tavily_api_key_here
+VITE_GOOGLE_MAPS_API_KEY=your_google_maps_api_key_here
 ```
 
-#### API Keys Overview
+Notes:
 
-| Key | Purpose | Get it from |
-| :--- | :--- | :--- |
-| `OPENROUTER_API_KEY` | LLM access | OpenRouter |
-| `TAVILY_API_KEY` | Real-time web search | Tavily |
+- `GEMINI_API_KEY` is required for planning.
+- `TAVILY_API_KEY` enables real-time grounding and research.
+- `VITE_GOOGLE_MAPS_API_KEY` is optional but recommended for the live map view.
 
----
-
-## ▶️ Running TripBuddy
-
-From the project directory:
+### 4. Run the app locally
 
 ```bash
-cd "Travel Agent V1"
-streamlit run app.py
+npm run dev
 ```
 
-Streamlit will provide a local URL, usually: `http://localhost:8501`. Open it in your browser and start planning!
+The app starts on the Express server with Vite middleware enabled for local development, usually on:
 
----
+```text
+http://localhost:3000
+```
 
-## 💬 Example Prompts
+### 5. Production build
 
-TripBuddy understands natural language, so you don't need a strict format.
-
-* 🏔️ **Weekend Adventure:**
-  > *"Plan a weekend trip to Rishikesh from Delhi. My budget is ₹8,000. I want nature, adventure and good cafes."*
-* 🏖️ **Relaxed Vacation:**
-  > *"Plan a 5-day trip to Bali for around $1,500. I prefer beaches, cafes and relaxed days. I don't want a packed schedule."*
-* 🏛️ **Culture & Food:**
-  > *"I'm going to Rome for 6 days with a $2,000 budget. I'm interested in history, architecture and Italian food."*
-* 📸 **Personalized Trip:**
-  > *"I want to spend 5 days in Manali starting from Delhi. My budget is ₹15,000. I love photography, nature and cafes, and I hate waking up early."*
-
----
-
-## 📋 What TripBuddy Generates
-
-A typical generated plan can include:
-
-* ✈️ **Flights:** Route options, airlines, estimated prices, direct vs. connecting options, flight duration, booking considerations.
-* 🏨 **Accommodation:** Budget, mid-range, and luxury options, recommended neighborhoods, estimated nightly prices, accommodation budget.
-* 🗺️ **Itinerary:** Morning activities, lunch recommendations, afternoon activities, dinner recommendations, evening options, transportation suggestions, estimated daily spending.
-* 💡 **Travel Tips:** Packing suggestions, local transportation, cultural considerations, booking tips, practical destination advice.
-
----
-
-## 🧩 LangGraph Workflow
-
-The workflow is implemented using a typed shared state: `TravelPlanState`.
-
-The state contains information such as:
-* Input: `user_request`, `destination`, `duration`, `budget`, `interests`, `origin`
-* Agent Outputs: `flight_info`, `hotel_info`, `itinerary_info`
-* Result: `final_plan`
-* Metadata: `errors`, `current_node`, `nodes_completed`
-
-Each node receives the current state and returns updates to it. The final synthesizer combines the specialist outputs into a single Markdown travel plan.
-
----
-
-## 🔍 Real-Time Information
-
-TripBuddy uses **Tavily Search** to research current web information rather than relying entirely on the model's static knowledge. This allows agents to search for:
-* Flight routes & airlines
-* Hotels & stay options
-* Attractions & local activities
-* Restaurants & travel guides
-
-Location-based discovery is additionally supported through **OpenStreetMap / Nominatim**.
-
-> **Disclaimer:** Prices, availability, schedules, and other travel information can change. Always verify important details before booking.
-
----
-
-## 🧪 Running Tests
-
-Install `pytest`:
 ```bash
-pip install pytest
+npm run build
+npm run start
 ```
 
-Run the test suite:
+This runs the built frontend and serves it through the Express production server.
+
+---
+
+## 🧪 Useful commands
+
 ```bash
-python -m pytest tests/ -v
+npm run dev      # start local development server
+npm run build    # create the production bundle
+npm run start    # run the production build
+npm run lint     # TypeScript check
 ```
 
-The tests cover areas such as user-request parsing, destination/duration/budget extraction, interest detection, workflow construction, and graph node wiring.
+---
+
+## 💬 Example prompts
+
+Try prompts like:
+
+- 🏔️ "Plan a 4-day trip to Goa starting from Mumbai. Budget is ₹20,000. I love beaches, seafood, and sunset viewpoints."
+- 🏕️ "I want to spend 5 days in Manali, starting from Delhi. My budget is ₹15,000. I love photography, nature and cafes. I prefer relaxed trips and hate waking up early."
+- 🏯 "Plan a 5-day cultural trip to Kyoto starting from Tokyo. Budget $1,800. Interested in temples, ramen and traditional gardens."
+- 🌊 "Plan 4 days on the Amalfi Coast starting from Rome. Budget €1,500. Scenic drives, beaches and Italian dining."
 
 ---
 
-## ⚙️ Configuration
+## 🔌 API endpoints
 
-The main model configuration lives in:
-`Travel Agent V1/config.py`
+The app exposes a few lightweight endpoints for status and planning:
 
-The application uses `ChatOpenAI` pointed to OpenRouter's API endpoint (`https://openrouter.ai/api/v1`). This makes it possible to switch between supported OpenRouter models without rewriting the agent implementation.
+```text
+GET  /api/status
+GET  /api/maps-key
+POST /api/plan
+POST /api/plan/stream
+```
 
----
-
-## 🗺 Roadmap
-
-Potential future improvements:
-- [ ] True parallel execution of specialist agents
-- [ ] Live flight APIs instead of search-based estimates
-- [ ] Live hotel availability and booking integrations
-- [ ] Interactive maps & trip cost visualization
-- [ ] Multi-city itinerary optimization
-- [ ] Calendar & PDF itinerary export
-- [ ] Weather-aware planning & visa requirement lookup
-- [ ] User profiles and persistent travel preferences
-- [ ] Mobile-friendly UI & budget optimization
+The streaming endpoint returns SSE events so the frontend can show live progress while the trip is being generated.
 
 ---
 
-## ⚠️️ Disclaimer
+## ⚠️ Disclaimer
 
-TripBuddy is an AI-assisted travel planning tool. Travel information such as prices, availability, opening hours, schedules, and recommendations may change. Search results can also be incomplete or inaccurate.
+TripBuddy is an AI-assisted travel planner. It can provide helpful recommendations, but prices, opening hours, availability, and route details may change without notice.
 
-Always verify important information directly with airlines, accommodation providers, attractions, and relevant official sources before making bookings or traveling.
+Always verify critical information directly with airlines, hotels, local providers, and official sources before booking or traveling.
 
 ---
 
 ## 🤝 Contributing
 
-Contributions, ideas, and improvements are welcome!
+Contributions are welcome.
 
 1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/your-feature`
-3. Make your changes and commit: `git commit -m "Add your feature"`
-4. Push to the branch: `git push origin feature/your-feature`
-5. Open a Pull Request
+2. Create a feature branch
+3. Make your changes
+4. Open a pull request
 
 ---
 
-## 👨‍💻 Built With
+## 👨‍💻 Built with curiosity
 
-Built with curiosity, caffeine, and a desire to make travel planning less painful. ☕✈️
+Built to make travel planning feel less like admin work and more like having a helpful local friend in your pocket. ☕✈️
 
-**TripBuddy** — *Your friend who actually plans the trip.*
+**TripBuddy** — *your friend who actually plans the trip.*
