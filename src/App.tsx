@@ -174,11 +174,41 @@ export default function App() {
     let itineraryAcc = '';
 
     try {
-      const response = await fetch('/api/plan/stream', {
+      let response = await fetch('/api/plan/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_request: prompt }),
       });
+
+      // If streaming returns 404 or fails, fallback to direct JSON endpoint /api/plan
+      if (!response.ok && response.status === 404) {
+        console.warn('Streaming endpoint 404, attempting fallback to direct JSON API /api/plan...');
+        response = await fetch('/api/plan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_request: prompt }),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          setCompletedNodes(['orchestrator', 'flight_agent', 'hotel_agent', 'itinerary_agent', 'synthesizer']);
+          const assistantMsg: ChatMessage = {
+            id: crypto.randomUUID(),
+            role: 'assistant',
+            content: data.final_plan,
+            timestamp: Date.now(),
+            parsed: data.parsed,
+            flight_info: data.flight_info,
+            hotel_info: data.hotel_info,
+            itinerary_info: data.itinerary_info,
+          };
+          setMessages((prev) => [...prev, assistantMsg]);
+          setIsLoading(false);
+          setCurrentNode(null);
+          setCurrentStatusText('');
+          return;
+        }
+      }
 
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
