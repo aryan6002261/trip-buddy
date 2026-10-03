@@ -212,10 +212,36 @@ export function orchestratorParse(request: string): Partial<TripState> {
 }
 
 // ---------------------------------------------------------
-// Call Gemini Helper
+// Call AI Helper (Gemini or OpenRouter)
 // ---------------------------------------------------------
 export async function callGemini(systemPrompt: string, userPrompt: string): Promise<string> {
   try {
+    if (process.env.OPENROUTER_API_KEY && !process.env.GEMINI_API_KEY) {
+      const model = process.env.DEFAULT_MODEL || 'openai/gpt-oss-20b:free';
+      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'http://localhost:3000',
+          'X-Title': 'TripBuddy',
+        },
+        body: JSON.stringify({
+          model: model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt }
+          ],
+          temperature: 0.7,
+        })
+      });
+      if (!res.ok) {
+         throw new Error(`OpenRouter Error: ${res.statusText}`);
+      }
+      const data = await res.json();
+      return data.choices?.[0]?.message?.content || '';
+    }
+
     const response = await ai.models.generateContent({
       model: 'gemini-3.8-flash',
       contents: userPrompt,
@@ -226,7 +252,7 @@ export async function callGemini(systemPrompt: string, userPrompt: string): Prom
     });
     return response.text || '';
   } catch (err: any) {
-    console.error('Gemini error:', err);
+    console.error('AI generation error:', err);
     return `Note: AI generation note (${err.message || 'connection issue'}). Using fallback planner recommendations.`;
   }
 }
