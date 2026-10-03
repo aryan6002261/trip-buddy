@@ -1,0 +1,7 @@
+{
+  "name": "TripBuddy - AI Travel Planning Agent",
+  "description": "Multi-agent personalized travel planner that builds custom trips with flights, accommodation, and day-by-day itineraries tailored to how you like to travel.",
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
