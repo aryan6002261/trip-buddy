@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { Copy, Check, Plane, Hotel, Calendar, MapPin, Map as MapIcon, Compass, Search, ExternalLink, Globe } from 'lucide-react';
+import { Copy, Check, Plane, Hotel, Calendar, MapPin, Map as MapIcon, Compass, Search, ExternalLink, Globe, FileDown, DollarSign } from 'lucide-react';
 import { ParsedTripDetails, GroundingSource } from '../types';
 import { GoogleMapView } from './GoogleMapView';
+import { ExpenseBreakdown } from './ExpenseBreakdown';
 import { MarkdownRenderer } from './MarkdownRenderer';
 
 interface PlanCardProps {
@@ -24,7 +25,7 @@ export const PlanCard: React.FC<PlanCardProps> = ({
   search_queries = parsed?.search_queries || [],
 }) => {
   const [copied, setCopied] = useState(false);
-  const [activeTab, setActiveTab] = useState<'all' | 'map' | 'transport' | 'stays' | 'itinerary' | 'grounding'>('all');
+  const [activeTab, setActiveTab] = useState<'all' | 'map' | 'transport' | 'stays' | 'itinerary' | 'grounding' | 'expenses'>('all');
 
   const handleCopy = () => {
     navigator.clipboard.writeText(content);
@@ -82,6 +83,14 @@ export const PlanCard: React.FC<PlanCardProps> = ({
               >
                 {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                 <span>{copied ? 'Copied' : 'Copy Plan'}</span>
+              </button>
+              <button
+                onClick={() => window.print()}
+                className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white flex items-center gap-1.5 transition cursor-pointer shadow-sm"
+                title="Export trip plan and expense breakdown as PDF"
+              >
+                <FileDown className="w-3.5 h-3.5" />
+                <span>Export as PDF</span>
               </button>
             </div>
           </div>
@@ -171,6 +180,17 @@ export const PlanCard: React.FC<PlanCardProps> = ({
             <span>Itinerary</span>
           </button>
         )}
+        <button
+          onClick={() => setActiveTab('expenses')}
+          className={`px-3 py-1.5 rounded-lg font-medium transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
+            activeTab === 'expenses'
+              ? 'bg-indigo-600 text-white shadow-sm'
+              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+          }`}
+        >
+          <DollarSign className="w-3 h-3 text-emerald-400" />
+          <span>Expenses</span>
+        </button>
         {(grounding_sources.length > 0 || search_queries.length > 0) && (
           <button
             onClick={() => setActiveTab('grounding')}
@@ -208,6 +228,10 @@ export const PlanCard: React.FC<PlanCardProps> = ({
               locationData={parsed?.location_data}
               originLocationData={parsed?.origin_location_data}
             />
+          </div>
+        ) : activeTab === 'expenses' ? (
+          <div className="space-y-4 not-prose">
+            <ExpenseBreakdown parsed={parsed} />
           </div>
         ) : activeTab === 'transport' && flight_info ? (
           <div className="space-y-4 not-prose">
@@ -326,6 +350,11 @@ export const PlanCard: React.FC<PlanCardProps> = ({
                 locationData={parsed?.location_data}
                 originLocationData={parsed?.origin_location_data}
               />
+            </div>
+
+            {/* Expense Breakdown Card */}
+            <div className="not-prose">
+              <ExpenseBreakdown parsed={parsed} />
             </div>
 
             <div className="pt-2 not-prose">

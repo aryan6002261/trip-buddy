@@ -111,7 +111,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             onChange={(e) => onModelChange(e.target.value)}
             className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-medium cursor-pointer"
           >
-            <option value="gemini-3.8-flash">⚡ Gemini 3.8 Flash (Active)</option>
+            <option value="gemini-3.5-flash-lite">⚡ Gemini 3.5 Flash Lite (Active)</option>
             <option value="gemma-4-31b">🆓 Gemma 4 31B (OpenRouter)</option>
             <option value="gpt-oss-20b">🆓 GPT-OSS 20B (Free)</option>
             <option value="free-auto">🆓 Auto-select Free Model</option>

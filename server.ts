@@ -26,7 +26,7 @@ const handleStatus = (_req: Request, res: Response) => {
   res.json({
     ai_model: geminiOk || openrouterOk,
     web_search: tavilyOk,
-    provider: geminiOk ? 'Google Gemini 3.8 Flash' : (openrouterOk ? 'OpenRouter' : 'Local Fallback'),
+    provider: geminiOk ? 'Google Gemini 3.5 Flash Lite' : (openrouterOk ? 'OpenRouter' : 'Local Fallback'),
     services: {
       gemini: geminiOk,
       openrouter: openrouterOk,

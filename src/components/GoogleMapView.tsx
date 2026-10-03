@@ -98,7 +98,7 @@ export const GoogleMapView: React.FC<GoogleMapViewProps> = ({
   apiKey: propApiKey,
 }) => {
   const [activeApiKey, setActiveApiKey] = useState<string>(
-    propApiKey || (import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string) || ''
+    propApiKey || ((import.meta as any).env.VITE_GOOGLE_MAPS_API_KEY as string) || ''
   );
   const [selectedDay, setSelectedDay] = useState<number | 'all'>('all');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');

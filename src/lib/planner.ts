@@ -128,22 +128,41 @@ export function orchestratorParse(request: string): Partial<TripState> {
     duration = 2;
   }
 
-  // Budget & Currency
-  let budget = 15000;
+  // Budget & Currency with support for k, lakh, thousand, and dynamic estimation
+  let budget = 0;
   let currency = '₹';
-  const inrMatch = reqLower.match(/(?:₹|rs\.?|inr)\s*([\d,]+)/);
-  const usdMatch = reqLower.match(/(?:\$|usd)\s*([\d,]+)/);
-  const eurMatch = reqLower.match(/(?:€|eur)\s*([\d,]+)/);
 
-  if (inrMatch) {
-    budget = parseFloat(inrMatch[1].replace(/,/g, ''));
-    currency = '₹';
-  } else if (usdMatch) {
-    budget = parseFloat(usdMatch[1].replace(/,/g, ''));
-    currency = '$';
-  } else if (eurMatch) {
-    budget = parseFloat(eurMatch[1].replace(/,/g, ''));
-    currency = '€';
+  const currencyRegexes = [
+    { regex: /(?:₹|rs\.?|inr)\s*([\d,]+(?:\.\d+)?)\s*(k|lakh|lac|thousand)?/i, curr: '₹', multiplier: (m: string) => m.toLowerCase().includes('k') ? 1000 : (m.toLowerCase().includes('lakh') || m.toLowerCase().includes('lac') ? 100000 : 1) },
+    { regex: /([\d,]+(?:\.\d+)?)\s*(k|lakh|lac|thousand)?\s*(?:₹|rs\.?|inr)/i, curr: '₹', multiplier: (m: string) => m.toLowerCase().includes('k') ? 1000 : (m.toLowerCase().includes('lakh') || m.toLowerCase().includes('lac') ? 100000 : 1) },
+    { regex: /(?:\$|usd)\s*([\d,]+(?:\.\d+)?)\s*(k|thousand)?/i, curr: '$', multiplier: (m: string) => m.toLowerCase().includes('k') ? 1000 : 1 },
+    { regex: /([\d,]+(?:\.\d+)?)\s*(k|thousand)?\s*(?:\$|usd)/i, curr: '$', multiplier: (m: string) => m.toLowerCase().includes('k') ? 1000 : 1 },
+    { regex: /(?:€|eur)\s*([\d,]+(?:\.\d+)?)\s*(k|thousand)?/i, curr: '€', multiplier: (m: string) => m.toLowerCase().includes('k') ? 1000 : 1 },
+    { regex: /([\d,]+(?:\.\d+)?)\s*(k|thousand)?\s*(?:€|eur)/i, curr: '€', multiplier: (m: string) => m.toLowerCase().includes('k') ? 1000 : 1 },
+    { regex: /budget\s*(?:of|is|around|about|upto)?\s*([\d,]+(?:\.\d+)?)\s*(k|lakh|lac|thousand)?/i, curr: '₹', multiplier: (m: string) => m.toLowerCase().includes('k') ? 1000 : (m.toLowerCase().includes('lakh') || m.toLowerCase().includes('lac') ? 100000 : 1) }
+  ];
+
+  for (const item of currencyRegexes) {
+    const match = reqLower.match(item.regex);
+    if (match) {
+      const rawVal = parseFloat(match[1].replace(/,/g, ''));
+      const multStr = match[2] || '';
+      const mult = item.multiplier(multStr);
+      budget = rawVal * mult;
+      currency = item.curr;
+      break;
+    }
+  }
+
+  if (budget === 0) {
+    const isInternational = /(tokyo|paris|london|new york|rome|switzerland|dubai|singapore|bali|thailand|europe|usa|japan)/i.test(reqLower);
+    if (isInternational) {
+      currency = '$';
+      budget = duration * 220;
+    } else {
+      currency = '₹';
+      budget = duration * 5000;
+    }
   }
 
   // Interests
@@ -403,7 +422,7 @@ export async function callGemini(systemPrompt: string, userPrompt: string): Prom
   const ai = getAIClient();
   if (!ai) return '*(API key not configured)*';
 
-  const models = ['gemini-3.1-flash-lite', 'gemini-3.8-flash'];
+  const models = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
   for (const model of models) {
     try {
       const response = await ai.models.generateContent({
@@ -442,7 +461,7 @@ export async function executePlanPipeline(
     parsed.origin && parsed.origin !== 'Flexible' ? lookupLocation(parsed.origin) : null,
   ]);
   parsed.location_data = locationData;
-  parsed.origin_location_data = originLocationData;
+  (parsed as any).origin_location_data = originLocationData;
 
   onEvent?.('orchestrator_complete', { parsed, locationData, originLocationData });
 

@@ -19,11 +19,11 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [currentModel, setCurrentModel] = useState('gemini-3.8-flash');
+  const [currentModel, setCurrentModel] = useState('gemini-3.5-flash-lite');
   const [serviceStatus, setServiceStatus] = useState({
     ai_model: true,
     web_search: false,
-    provider: 'Google Gemini 3.8 Flash',
+    provider: 'Google Gemini 3.5 Flash Lite',
   });
 
   // Voice to text Web Speech API state
