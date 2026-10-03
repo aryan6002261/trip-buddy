@@ -23,20 +23,20 @@ interface SidebarProps {
 
 const SAMPLE_PROMPTS = [
   {
+    title: 'Goa from Mumbai (Beach & Cafes)',
+    prompt: 'Plan a 4-day trip to Goa starting from Mumbai. Budget is ₹20,000. I love coastal cafes, sunset viewpoints and seafood.',
+  },
+  {
     title: 'Manali from Delhi (Relaxed)',
-    prompt: 'I want to spend 5 days in Manali, starting from Delhi. My budget is ₹15,000. I love photography, nature and cafes. I prefer relaxed trips and absolutely hate waking up early.',
+    prompt: 'I want to spend 5 days in Manali, starting from Delhi. My budget is ₹15,000. I love photography, nature and cafes. I prefer relaxed trips and hate waking up early.',
   },
   {
-    title: 'Rishikesh Adventure Weekend',
-    prompt: 'Plan a weekend trip to Rishikesh from Delhi. My budget is ₹8,000. I want nature, adventure and good cafes.',
+    title: 'Kyoto from Tokyo (Culture & Food)',
+    prompt: 'Plan a 5-day cultural trip to Kyoto starting from Tokyo. Budget $1,800. Interested in temples, authentic ramen and traditional tea gardens.',
   },
   {
-    title: 'Bali 5-day Chill',
-    prompt: 'Plan a 5-day trip to Bali for around $1,500. I prefer beaches, cafes and relaxed days. I don\'t want a packed schedule.',
-  },
-  {
-    title: 'Rome Culture & Food',
-    prompt: 'I\'m going to Rome for 6 days with a $2,000 budget. I\'m interested in history, architecture and Italian food.',
+    title: 'Amalfi Coast from Rome',
+    prompt: 'Plan 4 days on the Amalfi Coast starting from Rome. Budget €1,500. Scenic coastal drives, beaches and Italian dining.',
   },
 ];
 
@@ -89,7 +89,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </span>
             </div>
             <div className="text-sm font-bold text-white flex items-center gap-1.5">
-              <span>{tripDetails.origin || 'Delhi'}</span>
+              <span>{tripDetails.origin && tripDetails.origin !== 'Flexible' ? tripDetails.origin : 'Flexible Origin'}</span>
               <span className="text-slate-400">→</span>
               <span className="text-indigo-300">{tripDetails.destination}</span>
             </div>
@@ -135,22 +135,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </span>
             </div>
             <div className="flex items-center justify-between">
+              <span className="text-slate-300">Google Search Data</span>
+              <span className="flex items-center gap-1 font-medium text-blue-400">
+                <CheckCircle2 className="w-3.5 h-3.5 text-blue-400" /> Active Grounding
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-slate-300">Google Maps Data</span>
+              <span className="flex items-center gap-1 font-medium text-emerald-400">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> Active Grounding
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
               <span className="text-slate-300">OpenStreetMap Geocoding</span>
               <span className="flex items-center gap-1 font-medium text-emerald-400">
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> Active
               </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-slate-300">Tavily Web Search</span>
-              {serviceStatus.web_search ? (
-                <span className="flex items-center gap-1 font-medium text-emerald-400">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> Online
-                </span>
-              ) : (
-                <span className="flex items-center gap-1 font-medium text-slate-400">
-                  <span className="w-2 h-2 rounded-full bg-slate-500"></span> Ready (Built-in)
-                </span>
-              )}
             </div>
           </div>
         </div>

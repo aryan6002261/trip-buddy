@@ -1,5 +1,5 @@
 import React from 'react';
-import { Brain, Plane, Hotel, Map, Sparkles, CheckCircle2, Loader2 } from 'lucide-react';
+import { Brain, Plane, Hotel, Map, Sparkles, CheckCircle2, Loader2, Search, MapPin } from 'lucide-react';
 import { AgentNode } from '../types';
 
 interface ProgressIndicatorProps {
@@ -8,12 +8,12 @@ interface ProgressIndicatorProps {
   currentStatusText?: string;
 }
 
-const STEPS: { node: AgentNode; label: string; icon: React.ReactNode }[] = [
-  { node: 'orchestrator', label: 'Understanding Style', icon: <Brain className="w-3.5 h-3.5" /> },
-  { node: 'flight_agent', label: 'Transport & Routes', icon: <Plane className="w-3.5 h-3.5" /> },
-  { node: 'hotel_agent', label: 'Stays & Stays Style', icon: <Hotel className="w-3.5 h-3.5" /> },
-  { node: 'itinerary_agent', label: 'Day-by-Day Itinerary', icon: <Map className="w-3.5 h-3.5" /> },
-  { node: 'synthesizer', label: 'Synthesizing Plan', icon: <Sparkles className="w-3.5 h-3.5" /> },
+const STEPS: { node: AgentNode; label: string; tag?: string; icon: React.ReactNode }[] = [
+  { node: 'orchestrator', label: 'Trip Profiler', icon: <Brain className="w-3.5 h-3.5" /> },
+  { node: 'flight_agent', label: 'Live Transport', tag: 'Google Search', icon: <Plane className="w-3.5 h-3.5" /> },
+  { node: 'hotel_agent', label: 'Stays & Spots', tag: 'Google Maps', icon: <Hotel className="w-3.5 h-3.5" /> },
+  { node: 'itinerary_agent', label: 'Itinerary Pacing', icon: <Map className="w-3.5 h-3.5" /> },
+  { node: 'synthesizer', label: 'Synthesizing', icon: <Sparkles className="w-3.5 h-3.5" /> },
 ];
 
 export const ProgressIndicator: React.FC<ProgressIndicatorProps> = ({
@@ -27,12 +27,20 @@ export const ProgressIndicator: React.FC<ProgressIndicatorProps> = ({
         <div className="flex items-center gap-2">
           <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" />
           <span className="text-xs font-bold text-white uppercase tracking-wider">
-            Multi-Agent Workflow In Progress
+            Multi-Agent Grounding Workflow
           </span>
         </div>
-        <span className="text-xs text-indigo-300 font-mono">
-          {completedNodes.length}/5 completed
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-950/70 border border-blue-500/30 text-[10px] text-blue-300 font-mono">
+            <Search className="w-2.5 h-2.5" /> Google Search
+          </span>
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-950/70 border border-emerald-500/30 text-[10px] text-emerald-300 font-mono">
+            <MapPin className="w-2.5 h-2.5" /> Google Maps
+          </span>
+          <span className="text-xs text-indigo-300 font-mono ml-1">
+            {completedNodes.length}/5
+          </span>
+        </div>
       </div>
 
       {currentStatusText && (
@@ -72,6 +80,11 @@ export const ProgressIndicator: React.FC<ProgressIndicatorProps> = ({
                 )}
               </div>
               <span className="truncate w-full font-medium">{s.label}</span>
+              {s.tag && (
+                <span className="text-[9px] px-1 py-0.2 rounded bg-slate-800/80 border border-slate-700/60 text-slate-400 truncate max-w-full">
+                  {s.tag}
+                </span>
+              )}
             </div>
           );
         })}

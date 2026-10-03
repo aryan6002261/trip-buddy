@@ -1,3 +1,9 @@
+export interface GroundingSource {
+  title: string;
+  url: string;
+  type: 'search' | 'maps';
+}
+
 export interface ItineraryLocation {
   id: string;
   name: string;
@@ -28,7 +34,17 @@ export interface ParsedTripDetails {
     country: string;
     state: string;
   } | null;
+  origin_location_data?: {
+    name: string;
+    display_name: string;
+    lat: string;
+    lon: string;
+    country: string;
+    state: string;
+  } | null;
   locations?: ItineraryLocation[];
+  grounding_sources?: GroundingSource[];
+  search_queries?: string[];
 }
 
 export interface ChatMessage {
@@ -41,6 +57,8 @@ export interface ChatMessage {
   hotel_info?: string;
   itinerary_info?: string;
   locations?: ItineraryLocation[];
+  grounding_sources?: GroundingSource[];
+  search_queries?: string[];
 }
 
 export type AgentNode = 'orchestrator' | 'flight_agent' | 'hotel_agent' | 'itinerary_agent' | 'synthesizer';

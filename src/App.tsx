@@ -172,6 +172,8 @@ export default function App() {
     let flightAcc = '';
     let hotelAcc = '';
     let itineraryAcc = '';
+    let groundingSourcesAcc: any[] = [];
+    let searchQueriesAcc: string[] = [];
 
     try {
       let response = await fetch('/api/plan/stream', {
@@ -201,6 +203,8 @@ export default function App() {
             flight_info: data.flight_info,
             hotel_info: data.hotel_info,
             itinerary_info: data.itinerary_info,
+            grounding_sources: data.grounding_sources,
+            search_queries: data.search_queries,
           };
           setMessages((prev) => [...prev, assistantMsg]);
           setIsLoading(false);
@@ -219,6 +223,7 @@ export default function App() {
 
       if (!reader) throw new Error('No readable stream available.');
 
+      let planReceived = false;
       let buffer = '';
 
       while (true) {
@@ -226,22 +231,32 @@ export default function App() {
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
 
-        let currentEvent = 'message';
+        // SSE messages are delimited by double-newline \n\n
+        let boundaryIndex = buffer.indexOf('\n\n');
+        while (boundaryIndex !== -1) {
+          const rawMessage = buffer.slice(0, boundaryIndex);
+          buffer = buffer.slice(boundaryIndex + 2);
 
-        for (const line of lines) {
-          if (line.startsWith('event: ')) {
-            currentEvent = line.slice(7).trim();
-          } else if (line.startsWith('data: ')) {
-            const dataStr = line.slice(6).trim();
-            if (!dataStr) continue;
+          let eventType = 'message';
+          let dataContent = '';
 
+          const lines = rawMessage.split('\n');
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith('event:')) {
+              eventType = trimmed.slice(6).trim();
+            } else if (trimmed.startsWith('data:')) {
+              const slice = trimmed.slice(5).trim();
+              dataContent += (dataContent ? '\n' : '') + slice;
+            }
+          }
+
+          if (dataContent) {
             try {
-              const data = JSON.parse(dataStr);
+              const data = JSON.parse(dataContent);
 
-              if (currentEvent === 'status') {
+              if (eventType === 'status') {
                 setCurrentNode(data.node);
                 setCurrentStatusText(data.title || data.description);
                 if (data.node === 'flight_agent') {
@@ -253,19 +268,23 @@ export default function App() {
                 } else if (data.node === 'synthesizer') {
                   setCompletedNodes((prev) => Array.from(new Set([...prev, 'orchestrator', 'flight_agent', 'hotel_agent', 'itinerary_agent'])));
                 }
-              } else if (currentEvent === 'orchestrator_complete') {
+              } else if (eventType === 'orchestrator_complete') {
                 parsedAcc = data.parsed;
                 setActiveParsedDetails(data.parsed);
-              } else if (currentEvent === 'flight_complete') {
+              } else if (eventType === 'flight_complete') {
                 flightAcc = data.flight_info;
                 setActiveFlightInfo(data.flight_info);
-              } else if (currentEvent === 'hotel_complete') {
+                if (data.grounding_sources) groundingSourcesAcc.push(...data.grounding_sources);
+                if (data.search_queries) searchQueriesAcc.push(...data.search_queries);
+              } else if (eventType === 'hotel_complete') {
                 hotelAcc = data.hotel_info;
                 setActiveHotelInfo(data.hotel_info);
-              } else if (currentEvent === 'itinerary_complete') {
+                if (data.grounding_sources) groundingSourcesAcc.push(...data.grounding_sources);
+              } else if (eventType === 'itinerary_complete') {
                 itineraryAcc = data.itinerary_info;
                 setActiveItineraryInfo(data.itinerary_info);
-              } else if (currentEvent === 'complete') {
+              } else if (eventType === 'complete') {
+                planReceived = true;
                 setCompletedNodes(['orchestrator', 'flight_agent', 'hotel_agent', 'itinerary_agent', 'synthesizer']);
                 const assistantMsg: ChatMessage = {
                   id: crypto.randomUUID(),
@@ -276,18 +295,62 @@ export default function App() {
                   flight_info: data.flight_info || flightAcc,
                   hotel_info: data.hotel_info || hotelAcc,
                   itinerary_info: data.itinerary_info || itineraryAcc,
+                  grounding_sources: data.grounding_sources || groundingSourcesAcc,
+                  search_queries: data.search_queries || searchQueriesAcc,
                 };
                 setMessages((prev) => [...prev, assistantMsg]);
                 setIsLoading(false);
                 setCurrentNode(null);
                 setCurrentStatusText('');
-              } else if (currentEvent === 'error') {
-                throw new Error(data.message || 'Error occurred during trip generation.');
+              } else if (eventType === 'error') {
+                planReceived = true;
+                const errorMsg: ChatMessage = {
+                  id: crypto.randomUUID(),
+                  role: 'assistant',
+                  content: `⚠️ Trip planning note:\n\n${data.message || 'Could not complete the plan.'}\n\nPlease verify that your Gemini API key is configured and try again.`,
+                  timestamp: Date.now(),
+                };
+                setMessages((prev) => [...prev, errorMsg]);
+                setIsLoading(false);
+                setCurrentNode(null);
+                setCurrentStatusText('');
+                return;
               }
             } catch (jsonErr) {
-              console.warn('Error parsing SSE event data:', jsonErr);
+              console.warn('Error parsing complete SSE event block:', jsonErr);
             }
           }
+
+          boundaryIndex = buffer.indexOf('\n\n');
+        }
+      }
+
+      // If the stream finished without a complete message (e.g. stream dropped or parse skipped), directly fetch full plan via POST /api/plan
+      if (!planReceived) {
+        console.warn('Stream finished without complete event; retrieving plan directly via POST /api/plan...');
+        const directRes = await fetch('/api/plan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_request: prompt }),
+        });
+
+        if (directRes.ok) {
+          const data = await directRes.json();
+          planReceived = true;
+          setCompletedNodes(['orchestrator', 'flight_agent', 'hotel_agent', 'itinerary_agent', 'synthesizer']);
+          const assistantMsg: ChatMessage = {
+            id: crypto.randomUUID(),
+            role: 'assistant',
+            content: data.final_plan,
+            timestamp: Date.now(),
+            parsed: data.parsed || parsedAcc,
+            flight_info: data.flight_info || flightAcc,
+            hotel_info: data.hotel_info || hotelAcc,
+            itinerary_info: data.itinerary_info || itineraryAcc,
+            grounding_sources: data.grounding_sources || groundingSourcesAcc,
+            search_queries: data.search_queries || searchQueriesAcc,
+          };
+          setMessages((prev) => [...prev, assistantMsg]);
         }
       }
     } catch (err: any) {
@@ -450,6 +513,8 @@ export default function App() {
                     flight_info={msg.flight_info}
                     hotel_info={msg.hotel_info}
                     itinerary_info={msg.itinerary_info}
+                    grounding_sources={msg.grounding_sources || msg.parsed?.grounding_sources}
+                    search_queries={msg.search_queries || msg.parsed?.search_queries}
                   />
                 )}
               </div>

@@ -21,6 +21,7 @@ const handleStatus = (_req: Request, res: Response) => {
   const geminiOk = Boolean(process.env.GEMINI_API_KEY);
   const openrouterOk = Boolean(process.env.OPENROUTER_API_KEY);
   const tavilyOk = Boolean(process.env.TAVILY_API_KEY);
+  const mapsOk = Boolean(process.env.VITE_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY);
 
   res.json({
     ai_model: geminiOk || openrouterOk,
@@ -30,8 +31,14 @@ const handleStatus = (_req: Request, res: Response) => {
       gemini: geminiOk,
       openrouter: openrouterOk,
       tavily: tavilyOk,
+      maps: mapsOk,
     },
   });
+};
+
+const handleMapsKey = (_req: Request, res: Response) => {
+  const key = process.env.VITE_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY || '';
+  res.json({ key });
 };
 
 // ---------------------------------------------------------
@@ -95,6 +102,7 @@ const handlePlanJSON = async (req: Request, res: Response) => {
 // ---------------------------------------------------------
 const apiRouter = express.Router();
 apiRouter.get('/status', handleStatus);
+apiRouter.get('/maps-key', handleMapsKey);
 apiRouter.post('/plan/stream', handlePlanStream);
 apiRouter.post('/plan', handlePlanJSON);
 

@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { Copy, Check, Plane, Hotel, Calendar, DollarSign, Lightbulb, MapPin, Share2, Map as MapIcon, Compass } from 'lucide-react';
-import { ParsedTripDetails } from '../types';
-import { MockMap } from './MockMap';
+import { Copy, Check, Plane, Hotel, Calendar, MapPin, Map as MapIcon, Compass, Search, ExternalLink, Globe } from 'lucide-react';
+import { ParsedTripDetails, GroundingSource } from '../types';
+import { GoogleMapView } from './GoogleMapView';
+import { MarkdownRenderer } from './MarkdownRenderer';
 
 interface PlanCardProps {
   content: string;
@@ -9,6 +10,8 @@ interface PlanCardProps {
   flight_info?: string;
   hotel_info?: string;
   itinerary_info?: string;
+  grounding_sources?: GroundingSource[];
+  search_queries?: string[];
 }
 
 export const PlanCard: React.FC<PlanCardProps> = ({
@@ -17,9 +20,11 @@ export const PlanCard: React.FC<PlanCardProps> = ({
   flight_info,
   hotel_info,
   itinerary_info,
+  grounding_sources = parsed?.grounding_sources || [],
+  search_queries = parsed?.search_queries || [],
 }) => {
   const [copied, setCopied] = useState(false);
-  const [activeTab, setActiveTab] = useState<'all' | 'map' | 'transport' | 'stays' | 'itinerary'>('all');
+  const [activeTab, setActiveTab] = useState<'all' | 'map' | 'transport' | 'stays' | 'itinerary' | 'grounding'>('all');
 
   const handleCopy = () => {
     navigator.clipboard.writeText(content);
@@ -46,6 +51,17 @@ export const PlanCard: React.FC<PlanCardProps> = ({
                   {parsed.location_data.display_name}
                 </p>
               )}
+              {/* Grounding tags */}
+              <div className="flex items-center gap-2 mt-2">
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-950/80 border border-blue-500/40 text-[10px] text-blue-300 font-medium">
+                  <Search className="w-2.5 h-2.5 text-blue-400" />
+                  Google Search Grounded
+                </span>
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-950/80 border border-emerald-500/40 text-[10px] text-emerald-300 font-medium">
+                  <MapPin className="w-2.5 h-2.5 text-emerald-400" />
+                  Google Maps Grounded
+                </span>
+              </div>
             </div>
 
             <div className="flex items-center gap-2">
@@ -87,7 +103,7 @@ export const PlanCard: React.FC<PlanCardProps> = ({
             </div>
             <div className="p-2.5 rounded-lg bg-slate-800/40 border border-slate-700/50">
               <span className="text-slate-400 block text-[11px]">Departing From</span>
-              <span className="font-semibold text-white">{parsed.origin || 'Delhi'}</span>
+              <span className="font-semibold text-white">{parsed.origin || 'Flexible'}</span>
             </div>
           </div>
         </div>
@@ -126,7 +142,7 @@ export const PlanCard: React.FC<PlanCardProps> = ({
             }`}
           >
             <Plane className="w-3 h-3" />
-            <span>Transport</span>
+            <span>Transport (Search Grounded)</span>
           </button>
         )}
         {hotel_info && (
@@ -139,7 +155,7 @@ export const PlanCard: React.FC<PlanCardProps> = ({
             }`}
           >
             <Hotel className="w-3 h-3" />
-            <span>Stays</span>
+            <span>Stays (Maps Grounded)</span>
           </button>
         )}
         {itinerary_info && (
@@ -153,6 +169,19 @@ export const PlanCard: React.FC<PlanCardProps> = ({
           >
             <Calendar className="w-3 h-3" />
             <span>Itinerary</span>
+          </button>
+        )}
+        {(grounding_sources.length > 0 || search_queries.length > 0) && (
+          <button
+            onClick={() => setActiveTab('grounding')}
+            className={`px-3 py-1.5 rounded-lg font-medium transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
+              activeTab === 'grounding'
+                ? 'bg-indigo-600 text-white shadow-sm'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+            }`}
+          >
+            <Globe className="w-3 h-3 text-cyan-400" />
+            <span>Grounding Sources ({grounding_sources.length})</span>
           </button>
         )}
       </div>
@@ -170,44 +199,107 @@ export const PlanCard: React.FC<PlanCardProps> = ({
                 Pinch / Scroll to zoom • Drag to pan
               </span>
             </div>
-            <MockMap
+            <GoogleMapView
               locations={parsed?.locations}
               destination={parsed?.destination}
               origin={parsed?.origin}
               duration={parsed?.duration}
               itineraryText={itinerary_info}
               locationData={parsed?.location_data}
+              originLocationData={parsed?.origin_location_data}
             />
           </div>
         ) : activeTab === 'transport' && flight_info ? (
-          <div className="space-y-4">
-            <h3 className="text-base font-bold text-white flex items-center gap-2">
-              <Plane className="w-4 h-4 text-indigo-400" />
-              Transport & Route Options
-            </h3>
-            <div className="whitespace-pre-line text-slate-300 font-sans leading-relaxed">
-              {flight_info}
+          <div className="space-y-4 not-prose">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <h3 className="text-base font-bold text-white flex items-center gap-2 m-0">
+                <Plane className="w-4 h-4 text-indigo-400" />
+                Transport & Route Options
+              </h3>
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-950/70 border border-blue-500/30 text-[11px] text-blue-300">
+                <Search className="w-3 h-3 text-blue-400" /> Google Search Data
+              </span>
             </div>
+            <MarkdownRenderer content={flight_info} />
           </div>
         ) : activeTab === 'stays' && hotel_info ? (
-          <div className="space-y-4">
-            <h3 className="text-base font-bold text-white flex items-center gap-2">
-              <Hotel className="w-4 h-4 text-indigo-400" />
-              Accommodation Recommendations
-            </h3>
-            <div className="whitespace-pre-line text-slate-300 font-sans leading-relaxed">
-              {hotel_info}
+          <div className="space-y-4 not-prose">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <h3 className="text-base font-bold text-white flex items-center gap-2 m-0">
+                <Hotel className="w-4 h-4 text-indigo-400" />
+                Accommodation Recommendations
+              </h3>
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-950/70 border border-emerald-500/30 text-[11px] text-emerald-300">
+                <MapPin className="w-3 h-3 text-emerald-400" /> Google Maps Data
+              </span>
             </div>
+            <MarkdownRenderer content={hotel_info} />
           </div>
         ) : activeTab === 'itinerary' && itinerary_info ? (
-          <div className="space-y-4">
-            <h3 className="text-base font-bold text-white flex items-center gap-2">
+          <div className="space-y-4 not-prose">
+            <h3 className="text-base font-bold text-white flex items-center gap-2 pb-2 border-b border-slate-800 m-0">
               <Calendar className="w-4 h-4 text-indigo-400" />
               Day-by-Day Personalized Itinerary
             </h3>
-            <div className="whitespace-pre-line text-slate-300 font-sans leading-relaxed">
-              {itinerary_info}
-            </div>
+            <MarkdownRenderer content={itinerary_info} />
+          </div>
+        ) : activeTab === 'grounding' ? (
+          <div className="space-y-4 not-prose">
+            <h3 className="text-base font-bold text-white flex items-center gap-2">
+              <Globe className="w-4 h-4 text-cyan-400" />
+              Live Grounding & Data Sources
+            </h3>
+            <p className="text-xs text-slate-400">
+              This trip was generated with real-time data verified via Google Search Grounding and Google Maps Grounding.
+            </p>
+
+            {search_queries.length > 0 && (
+              <div className="p-3 rounded-xl bg-slate-800/40 border border-slate-700/60 space-y-2">
+                <span className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                  <Search className="w-3 h-3 text-blue-400" /> Google Search Queries Run
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {search_queries.map((q, idx) => (
+                    <span key={idx} className="px-2 py-1 rounded bg-slate-900 border border-slate-700 text-xs text-slate-300 font-mono">
+                      {q}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {grounding_sources.length > 0 ? (
+              <div className="space-y-2">
+                <span className="text-xs font-semibold text-slate-300 block">Verified Places & Citations</span>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {grounding_sources.map((source, idx) => (
+                    <a
+                      key={idx}
+                      href={source.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="p-2.5 rounded-lg bg-slate-800/60 hover:bg-slate-800 border border-slate-700/60 hover:border-slate-600 transition flex items-center justify-between text-xs group"
+                    >
+                      <div className="flex items-center gap-2 truncate pr-2">
+                        {source.type === 'maps' ? (
+                          <MapPin className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                        ) : (
+                          <Globe className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                        )}
+                        <span className="text-slate-200 group-hover:text-white truncate font-medium">
+                          {source.title}
+                        </span>
+                      </div>
+                      <ExternalLink className="w-3 h-3 text-slate-500 group-hover:text-slate-300 shrink-0" />
+                    </a>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <p className="text-xs text-slate-500 italic">
+                Grounding queries were queried through Gemini 3.5 Flash Google Search & Maps APIs.
+              </p>
+            )}
           </div>
         ) : (
           <div className="space-y-6">
@@ -225,18 +317,19 @@ export const PlanCard: React.FC<PlanCardProps> = ({
                   Expand Full Map View ↗
                 </button>
               </div>
-              <MockMap
+              <GoogleMapView
                 locations={parsed?.locations}
                 destination={parsed?.destination}
                 origin={parsed?.origin}
                 duration={parsed?.duration}
                 itineraryText={itinerary_info}
                 locationData={parsed?.location_data}
+                originLocationData={parsed?.origin_location_data}
               />
             </div>
 
-            <div className="whitespace-pre-line text-slate-300 font-sans leading-relaxed pt-2">
-              {content}
+            <div className="pt-2 not-prose">
+              <MarkdownRenderer content={content} />
             </div>
           </div>
         )}
