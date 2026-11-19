@@ -49,6 +49,23 @@ import { GroupDecisionPanel } from './components/GroupDecisionPanel';
 import { DiscoverPanel } from './components/DiscoverPanel';
 import { PrintableTripView } from './components/PrintableTripView';
 
+async function readApiJson<T = any>(res: Response): Promise<T> {
+  const raw = await res.text();
+  let parsed: any = null;
+  try {
+    parsed = raw ? JSON.parse(raw) : null;
+  } catch {
+    const snippet = raw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 140);
+    throw new Error(
+      `API returned a non-JSON response (${res.status})${snippet ? `: ${snippet}` : ''}`
+    );
+  }
+  if (!res.ok) {
+    throw new Error(parsed?.error || `Request failed (${res.status})`);
+  }
+  return parsed as T;
+}
+
 function applyTripPatch(trip: TripWorkspace, patch?: TripPatch): TripWorkspace {
   if (!patch) return trip;
   const next: TripWorkspace = {
@@ -295,12 +312,7 @@ export default function App() {
           model: selectedModel,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Could not reach TripBuddy AI.');
-      }
-
-      const turn = data as ChatTurnResponse;
+      const turn = await readApiJson<ChatTurnResponse>(res);
       const assistantMsg: ChatMessage = {
         id: `msg-a-${Date.now()}`,
         role: 'assistant',
@@ -416,8 +428,7 @@ export default function App() {
           lon,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Could not load weather.');
+      const data = await readApiJson(res);
       updateActiveTrip((t) => ({ ...t, weather: data }));
     } catch (err: any) {
       setErrorMsg(err?.message || 'Weather lookup failed.');
@@ -435,8 +446,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ trip: activeTrip, model: selectedModel }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Weather adaptation failed.');
+      const data = await readApiJson(res);
 
       const msg: ChatMessage = {
         id: `msg-wx-${Date.now()}`,
@@ -481,8 +491,7 @@ export default function App() {
           model: selectedModel,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Live suggestions failed.');
+      const data = await readApiJson(res);
 
       const msg: ChatMessage = {
         id: `msg-live-${Date.now()}`,
@@ -555,8 +564,7 @@ export default function App() {
           model: selectedModel,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Plan B generation failed.');
+      const data = await readApiJson(res);
       setPlanBResults(data.alternatives || []);
       setPlanBNote(data.note || null);
     } catch (err: any) {
@@ -685,8 +693,7 @@ export default function App() {
           model: selectedModel,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Cost reality check failed.');
+      const data = await readApiJson(res);
 
       const msg: ChatMessage = {
         id: `msg-rc-${Date.now()}`,
@@ -746,8 +753,7 @@ export default function App() {
           model: selectedModel,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Group synthesis failed.');
+      const data = await readApiJson(res);
 
       const msg: ChatMessage = {
         id: `msg-grp-${Date.now()}`,
@@ -792,8 +798,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...params, model: selectedModel }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Surprise Me failed.');
+      const data = await readApiJson(res);
 
       updateActiveTrip((t) => ({
         ...t,
@@ -839,8 +844,7 @@ export default function App() {
           model: selectedModel,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Local gems lookup failed.');
+      const data = await readApiJson(res);
 
       const msg: ChatMessage = {
         id: `msg-gems-${Date.now()}`,
