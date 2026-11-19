@@ -1,11 +1,11 @@
 import { GoogleGenAI } from '@google/genai';
-import {
+import type {
   AIModelDefinition,
   AIProviderId,
   GroundingSource,
   WeatherDayForecast,
   WeatherSnapshot,
-} from '../types';
+} from '../types.js';
 
 let cachedGeminiClient: GoogleGenAI | null = null;
 let geminiAuthState: 'unknown' | 'valid' | 'invalid' = 'unknown';

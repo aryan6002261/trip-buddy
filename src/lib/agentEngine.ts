@@ -1,4 +1,4 @@
-import {
+import type {
   AIProviderId,
   ChatTurnResponse,
   CostRealityCheckResult,
@@ -13,7 +13,7 @@ import {
   TripPatch,
   TripWorkspace,
   WeatherSnapshot,
-} from '../types';
+} from '../types.js';
 import {
   callAI,
   dedupeSources,
@@ -21,8 +21,8 @@ import {
   fetchOpenMeteoWeather,
   geocodePlace,
   tavilySearch,
-} from './providers';
-import { getCurrencySymbol } from './storage';
+} from './providers.js';
+import { getCurrencySymbol } from './storage.js';
 
 const CURRENT_YEAR = new Date().getFullYear();
 

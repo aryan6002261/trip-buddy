@@ -1,4 +1,4 @@
-import { TripWorkspace } from '../types';
+import type { TripWorkspace } from '../types.js';
 
 const STORAGE_KEY = 'tripbuddy_workspaces_v2';
 const ACTIVE_ID_KEY = 'tripbuddy_active_workspace_v2';

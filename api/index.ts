@@ -1,4 +1,4 @@
-import { createVercelApiApp } from '../src/lib/apiApp';
+import { createVercelApiApp } from '../src/lib/apiApp.js';
 
 const app = createVercelApiApp();
 

@@ -3,7 +3,7 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import { createApiRouter } from './src/lib/apiApp';
+import { createApiRouter } from './src/lib/apiApp.js';
 
 dotenv.config();
 

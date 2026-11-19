@@ -1,7 +1,7 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { getAvailableModels } from './providers';
+import { getAvailableModels } from './providers.js';
 import {
   runConversationalTurn,
   runCostRealityCheck,
@@ -12,7 +12,7 @@ import {
   runSurpriseMe,
   runWeatherAdaptation,
   runWeatherFetch,
-} from './agentEngine';
+} from './agentEngine.js';
 
 dotenv.config();
 
