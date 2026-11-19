@@ -244,6 +244,39 @@ export interface LiveLocationContext {
   source: 'gps' | 'manual' | 'destination';
 }
 
+export interface AreaNewsItem {
+  id: string;
+  title: string;
+  sourceName: string;
+  url: string;
+  publishedDate?: string;
+  category: 'transit' | 'events' | 'weather' | 'closure' | 'safety' | 'local';
+  severity: 'info' | 'watch' | 'alert';
+  impactSummary: string;
+  actionableAdvice?: string;
+}
+
+export interface AreaNewsFeed {
+  locationName: string;
+  summary: string;
+  items: AreaNewsItem[];
+  sources: GroundingSource[];
+  fetchedAt: string;
+}
+
+export interface TripGuidance {
+  headline: string;
+  nextAction: string;
+  currentStopTitle?: string;
+  nextStopTitle?: string;
+  transitTip: string;
+  budgetCheckNote: string;
+  newsHeadsUp: string;
+  quickActions: string[];
+  sources: GroundingSource[];
+  updatedAt: string;
+}
+
 export interface TripWorkspace {
   id: string;
   title: string;
@@ -269,6 +302,8 @@ export interface TripWorkspace {
   groupMembers: GroupMember[];
   groupConsensus: GroupConsensus | null;
   weather: WeatherSnapshot | null;
+  areaNews: AreaNewsFeed | null;
+  activeGuidance: TripGuidance | null;
   liveSuggestions: LiveSuggestion[];
   hiddenGems: HiddenGemItem[];
   surprisePitches: SurprisePitch[];

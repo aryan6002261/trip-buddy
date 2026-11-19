@@ -12,8 +12,12 @@ import {
   Crosshair,
   AlertTriangle,
   ArrowRightLeft,
+  Newspaper,
+  ExternalLink,
+  ArrowRight,
 } from 'lucide-react';
 import {
+  AreaNewsItem,
   ItineraryStop,
   LiveSuggestion,
   PlanBAlternative,
@@ -30,6 +34,8 @@ interface LiveCompanionPanelProps {
   onClearPlanBTarget: () => void;
   onFetchWeather: (lat?: number, lon?: number, label?: string) => Promise<void>;
   onAdaptWeather: () => Promise<void>;
+  onFetchAreaNews: (locationOverride?: string) => Promise<void>;
+  onReactToNewsItem: (item: AreaNewsItem) => void;
   onGetLiveSuggestions: (params: {
     locationLabel: string;
     lat?: number;
@@ -52,6 +58,8 @@ export const LiveCompanionPanel: React.FC<LiveCompanionPanelProps> = ({
   onClearPlanBTarget,
   onFetchWeather,
   onAdaptWeather,
+  onFetchAreaNews,
+  onReactToNewsItem,
   onGetLiveSuggestions,
   onAddLiveSuggestionToDay,
   onRunPlanB,
@@ -107,8 +115,128 @@ export const LiveCompanionPanel: React.FC<LiveCompanionPanelProps> = ({
     (d) => d.severity === 'disruptive' || d.severity === 'caution'
   );
 
+  const newsTarget = locationInput.trim() || [trip.destination, trip.country].filter(Boolean).join(', ');
+
   return (
     <div className="space-y-5">
+      {/* Live Area News & Trusted Sources Feed (Tavily News) */}
+      <div className="rounded-lg bg-[#131C2E] border border-[#24324A] p-4 space-y-3.5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-100 flex items-center gap-2">
+              <Newspaper className="w-4 h-4 text-cyan-400" />
+              <span>Live Area News & Trusted Advisories</span>
+            </h3>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Real-time transit disruptions, local events, closures, and breaking area updates pulled via Tavily from trusted publications.
+            </p>
+          </div>
+          <button
+            type="button"
+            disabled={isBusy || !newsTarget}
+            onClick={() => onFetchAreaNews(newsTarget)}
+            className="px-3.5 py-1.5 rounded-md bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 text-[#0B1120] font-semibold text-xs transition flex items-center gap-1.5 cursor-pointer"
+          >
+            {isBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+            <span>Refresh Live News</span>
+          </button>
+        </div>
+
+        {!trip.areaNews ? (
+          <div className="p-4 rounded-md bg-[#0F172A] border border-[#24324A] text-xs text-slate-400 flex flex-wrap items-center justify-between gap-3">
+            <span>
+              {newsTarget
+                ? `Load live breaking news, transit notices, and local events happening right now in ${newsTarget}.`
+                : 'Enter your current city below or choose a destination in chat to track local news.'}
+            </span>
+            {newsTarget && (
+              <button
+                type="button"
+                disabled={isBusy}
+                onClick={() => onFetchAreaNews(newsTarget)}
+                className="text-cyan-400 hover:text-cyan-300 font-medium cursor-pointer"
+              >
+                Fetch Trusted Updates
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="p-3 rounded-md bg-[#0F172A] border border-[#24324A] text-xs text-slate-200 leading-relaxed flex flex-wrap items-center justify-between gap-2">
+              <span>{trip.areaNews.summary}</span>
+              <span className="text-[10px] font-mono text-slate-500">
+                {trip.areaNews.locationName} · Checked{' '}
+                {new Date(trip.areaNews.fetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              </span>
+            </div>
+
+            {trip.areaNews.items.length > 0 && (
+              <div className="divide-y divide-[#1E2B42] border border-[#24324A] rounded-md bg-[#0F172A]">
+                {trip.areaNews.items.map((item) => (
+                  <div key={item.id} className="p-3.5 flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[11px]">
+                        <span
+                          className={`font-semibold uppercase tracking-wide ${
+                            item.severity === 'alert'
+                              ? 'text-red-400'
+                              : item.severity === 'watch'
+                              ? 'text-amber-300'
+                              : 'text-cyan-300'
+                          }`}
+                        >
+                          {item.category}
+                        </span>
+                        <span className="text-slate-600">·</span>
+                        <span className="font-mono text-slate-400">{item.sourceName}</span>
+                        {item.publishedDate && (
+                          <>
+                            <span className="text-slate-600">·</span>
+                            <span className="font-mono text-slate-500">{item.publishedDate.slice(0, 10)}</span>
+                          </>
+                        )}
+                      </div>
+
+                      {item.url ? (
+                        <a
+                          href={item.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-sm font-semibold text-slate-100 hover:text-cyan-300 transition inline-flex items-center gap-1.5"
+                        >
+                          <span>{item.title}</span>
+                          <ExternalLink className="w-3 h-3 shrink-0 opacity-75" />
+                        </a>
+                      ) : (
+                        <div className="text-sm font-semibold text-slate-100">{item.title}</div>
+                      )}
+
+                      <p className="text-xs text-slate-300 leading-relaxed">{item.impactSummary}</p>
+                      {item.actionableAdvice && (
+                        <p className="text-[11px] text-cyan-300/90">
+                          Traveler move: {item.actionableAdvice}
+                        </p>
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      onClick={() => onReactToNewsItem(item)}
+                      className="px-2.5 py-1.5 rounded-md border border-[#24324A] hover:border-cyan-500/50 bg-[#131C2E] text-[11px] text-slate-200 hover:text-cyan-300 transition flex items-center gap-1 shrink-0 cursor-pointer"
+                      title="Ask AI strategist to adjust your itinerary around this news item"
+                    >
+                      <span>Adjust Plan</span>
+                      <ArrowRight className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
       {/* Live Location & Right-Now Companion */}
       <div className="rounded-lg bg-[#131C2E] border border-[#24324A] p-4 space-y-3.5">
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -132,9 +260,7 @@ export const LiveCompanionPanel: React.FC<LiveCompanionPanelProps> = ({
           </button>
         </div>
 
-        {geoError && (
-          <p className="text-xs text-amber-300">{geoError}</p>
-        )}
+        {geoError && <p className="text-xs text-amber-300">{geoError}</p>}
 
         <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
           <div className="md:col-span-5">
@@ -209,7 +335,6 @@ export const LiveCompanionPanel: React.FC<LiveCompanionPanelProps> = ({
           </button>
         </div>
 
-        {/* Live Suggestions Output */}
         {trip.liveSuggestions.length > 0 && (
           <div className="pt-3 border-t border-[#24324A] space-y-2.5">
             <div className="flex items-center justify-between text-xs">
@@ -332,7 +457,6 @@ export const LiveCompanionPanel: React.FC<LiveCompanionPanelProps> = ({
           </div>
         ) : (
           <div className="space-y-3">
-            {/* Current Summary Line */}
             <div className="p-3 rounded-md bg-[#0F172A] border border-[#24324A] flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-3">
                 <div className="text-2xl font-bold font-mono tabular-nums text-slate-50">
@@ -364,7 +488,6 @@ export const LiveCompanionPanel: React.FC<LiveCompanionPanelProps> = ({
               )}
             </div>
 
-            {/* 7-Day Forecast Strip */}
             <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
               {trip.weather.daily.slice(0, 7).map((d, idx) => {
                 const isAlert = d.severity === 'disruptive';
@@ -461,9 +584,7 @@ export const LiveCompanionPanel: React.FC<LiveCompanionPanelProps> = ({
           </button>
         </div>
 
-        {planBNote && (
-          <p className="text-xs text-slate-300">{planBNote}</p>
-        )}
+        {planBNote && <p className="text-xs text-slate-300">{planBNote}</p>}
 
         {planBResults.length > 0 && (
           <div className="divide-y divide-[#1E2B42] border border-[#24324A] rounded-md bg-[#0F172A]">

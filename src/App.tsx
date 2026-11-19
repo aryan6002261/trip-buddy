@@ -10,10 +10,13 @@ import {
   Sparkles,
   Trash2,
   Map as MapIcon,
+  AlertTriangle,
+  X,
 } from 'lucide-react';
 import {
   AIModelDefinition,
   AIProviderId,
+  AreaNewsItem,
   ChatMessage,
   ChatTurnResponse,
   CockpitTab,
@@ -48,6 +51,7 @@ import { BudgetRealityPanel } from './components/BudgetRealityPanel';
 import { GroupDecisionPanel } from './components/GroupDecisionPanel';
 import { DiscoverPanel } from './components/DiscoverPanel';
 import { PrintableTripView } from './components/PrintableTripView';
+import { TripProgressBar } from './components/TripProgressBar';
 
 async function readApiJson<T = any>(res: Response): Promise<T> {
   const raw = await res.text();
@@ -215,6 +219,7 @@ export default function App() {
           const savedExists = data.availableModels.some((m) => m.id === selectedModel);
           if (
             !savedExists ||
+            selectedModel === 'openrouter/auto' ||
             (topModel.provider === 'openrouter' && !selectedModel.startsWith('openrouter/'))
           ) {
             setSelectedModel(topModel.id);
@@ -269,6 +274,12 @@ export default function App() {
     updateActiveTrip((t) => ({ ...t, mode }));
     if (mode === 'live') {
       setActiveTab('live');
+      const isNewsStale =
+        !activeTrip.areaNews?.fetchedAt ||
+        Date.now() - new Date(activeTrip.areaNews.fetchedAt).getTime() > 20 * 60 * 1000;
+      if ((activeTrip.destination || activeTrip.liveLocation.label) && isNewsStale) {
+        void handleFetchAreaNews();
+      }
     } else if (activeTab === 'live') {
       setActiveTab('itinerary');
     }
@@ -333,7 +344,7 @@ export default function App() {
         };
       });
 
-      // Automatically fetch live weather once a destination is newly established
+      // Automatically fetch live weather & Tavily area news once a destination is newly established
       if (turn.tripPatch?.destination && turn.tripPatch.destination !== activeTrip.destination) {
         fetch('/api/weather', {
           method: 'POST',
@@ -349,6 +360,24 @@ export default function App() {
           .then((weather) => {
             if (weather?.currentTemp !== undefined) {
               updateActiveTrip((t) => ({ ...t, weather }));
+            }
+          })
+          .catch(() => {});
+
+        fetch('/api/news', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            destination: turn.tripPatch.destination,
+            country: turn.tripPatch.country,
+            model: selectedModel,
+          }),
+        })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((data) => {
+            const feed = data?.feed || (data?.items ? data : null);
+            if (feed?.items) {
+              updateActiveTrip((t) => ({ ...t, areaNews: feed }));
             }
           })
           .catch(() => {});
@@ -469,6 +498,67 @@ export default function App() {
     } finally {
       setIsPanelBusy(false);
     }
+  };
+
+  // Live Tavily Area News Brief
+  const handleFetchAreaNews = async (locationOverride?: string) => {
+    const dest =
+      locationOverride?.trim() || activeTrip.liveLocation.label || activeTrip.destination;
+    if (!dest) return;
+    setIsPanelBusy(true);
+    setErrorMsg(null);
+    try {
+      const res = await fetch('/api/news', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          destination: dest,
+          country: locationOverride ? undefined : activeTrip.country,
+          model: selectedModel,
+        }),
+      });
+      const data = await readApiJson(res);
+      const feed = data?.feed || data;
+      updateActiveTrip((t) => ({ ...t, areaNews: feed }));
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Could not fetch live area news.');
+    } finally {
+      setIsPanelBusy(false);
+    }
+  };
+
+  // Real-Time Trip Progress Guidance (Weather + Tavily News + Next Stop + Budget)
+  const handleRequestGuidance = async () => {
+    setIsPanelBusy(true);
+    setErrorMsg(null);
+    try {
+      const res = await fetch('/api/trip/guide', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          trip: activeTrip,
+          model: selectedModel,
+        }),
+      });
+      const data = await readApiJson(res);
+      updateActiveTrip((t) => ({
+        ...t,
+        activeGuidance: data.guidance,
+        weather: data.weather || t.weather,
+        areaNews: data.areaNews || t.areaNews,
+      }));
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Could not generate live trip guidance.');
+    } finally {
+      setIsPanelBusy(false);
+    }
+  };
+
+  const handleReactToNewsItem = (item: AreaNewsItem) => {
+    setMobilePane('chat');
+    handleSendMessage(
+      `Live local news update in ${activeTrip.destination || activeTrip.liveLocation.label}: "${item.title}" (${item.sourceName}) — ${item.impactSummary}. Does this affect our current itinerary or route, and what adjustment should we make right now?`
+    );
   };
 
   // Live Companion Suggestions
@@ -1155,6 +1245,44 @@ export default function App() {
             }`}
           >
             <div className="max-w-4xl mx-auto">
+              {errorMsg && (
+                <div className="mb-4 px-3.5 py-2.5 rounded-lg bg-red-950/60 border border-red-800/70 text-xs text-red-200 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+                    <span className="break-words">{errorMsg}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setErrorMsg(null)}
+                    className="text-red-300 hover:text-white shrink-0 cursor-pointer"
+                    aria-label="Dismiss error"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+
+              <TripProgressBar
+                trip={activeTrip}
+                isBusy={isChatLoading || isPanelBusy}
+                onMarkNextDone={handleToggleStopCompleted}
+                onRequestGuidance={handleRequestGuidance}
+                onOpenLiveNews={() => {
+                  setActiveTab('live');
+                  setMobilePane('cockpit');
+                  if (
+                    !activeTrip.areaNews &&
+                    (activeTrip.destination || activeTrip.liveLocation.label)
+                  ) {
+                    void handleFetchAreaNews();
+                  }
+                }}
+                onAskQuickAction={(prompt) => {
+                  setMobilePane('chat');
+                  handleSendMessage(prompt);
+                }}
+              />
+
               {activeTab === 'itinerary' && (
                 <ItineraryMapPanel
                   trip={activeTrip}
@@ -1189,6 +1317,8 @@ export default function App() {
                   onUpdateLiveLocation={(liveLocation) =>
                     updateActiveTrip((t) => ({ ...t, liveLocation }))
                   }
+                  onFetchAreaNews={handleFetchAreaNews}
+                  onReactToNewsItem={handleReactToNewsItem}
                 />
               )}
 

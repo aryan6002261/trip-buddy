@@ -76,6 +76,8 @@ export function createNewWorkspace(partial?: Partial<TripWorkspace>): TripWorksp
     groupMembers: partial?.groupMembers || [],
     groupConsensus: partial?.groupConsensus || null,
     weather: partial?.weather || null,
+    areaNews: partial?.areaNews || null,
+    activeGuidance: partial?.activeGuidance || null,
     liveSuggestions: partial?.liveSuggestions || [],
     hiddenGems: partial?.hiddenGems || [],
     surprisePitches: partial?.surprisePitches || [],
@@ -112,7 +114,11 @@ export function loadWorkspaces(): TripWorkspace[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed;
+    return parsed.map((w: any) => ({
+      ...w,
+      areaNews: w.areaNews ?? null,
+      activeGuidance: w.activeGuidance ?? null,
+    }));
   } catch {
     return [];
   }

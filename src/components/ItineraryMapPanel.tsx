@@ -159,27 +159,25 @@ export const ItineraryMapPanel: React.FC<ItineraryMapPanelProps> = ({
         </div>
       </div>
 
-      {/* Interactive Google Map */}
-      {(trip.destination || totalStops > 0 || trip.hiddenGems.some((g) => g.pinnedOnMap)) && (
-        <GoogleMapView
-          destination={trip.destination}
-          country={trip.country}
-          centerLat={trip.lat}
-          centerLon={trip.lon}
-          days={trip.days}
-          hiddenGems={trip.hiddenGems}
-          liveSuggestions={trip.liveSuggestions}
-          userLocation={
-            trip.liveLocation.source === 'gps' && trip.liveLocation.lat && trip.liveLocation.lon
-              ? { lat: trip.liveLocation.lat, lon: trip.liveLocation.lon, label: trip.liveLocation.label }
-              : null
-          }
-          currency={trip.currency}
-          currencySymbol={trip.currencySymbol}
-          focusedPinId={focusedPinId}
-          onSelectPin={setFocusedPinId}
-        />
-      )}
+      {/* Interactive Route Map (Always visible & live-updated) */}
+      <GoogleMapView
+        destination={trip.destination}
+        country={trip.country}
+        centerLat={trip.lat}
+        centerLon={trip.lon}
+        days={trip.days}
+        hiddenGems={trip.hiddenGems}
+        liveSuggestions={trip.liveSuggestions}
+        userLocation={
+          trip.liveLocation.source === 'gps' && trip.liveLocation.lat && trip.liveLocation.lon
+            ? { lat: trip.liveLocation.lat, lon: trip.liveLocation.lon, label: trip.liveLocation.label }
+            : null
+        }
+        currency={trip.currency}
+        currencySymbol={trip.currencySymbol}
+        focusedPinId={focusedPinId}
+        onSelectPin={setFocusedPinId}
+      />
 
       {/* Itinerary Section */}
       {trip.days.length === 0 ? (

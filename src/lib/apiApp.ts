@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { getAvailableModels } from './providers.js';
 import {
+  runAreaNewsBrief,
   runConversationalTurn,
   runCostRealityCheck,
   runGroupSynthesis,
@@ -10,6 +11,7 @@ import {
   runLocalGemsDiscovery,
   runPlanBGenerator,
   runSurpriseMe,
+  runTripProgressGuidance,
   runWeatherAdaptation,
   runWeatherFetch,
 } from './agentEngine.js';
@@ -66,6 +68,36 @@ export function createApiRouter() {
     } catch (err: any) {
       console.error('[/api/weather] error:', err);
       res.status(500).json({ error: err?.message || 'Unable to fetch live weather.' });
+    }
+  });
+
+  apiRouter.post('/news', async (req: Request, res: Response) => {
+    try {
+      const { destination, country, model } = req.body || {};
+      const result = await runAreaNewsBrief({
+        destination: destination || '',
+        country,
+        model,
+      });
+      res.json(result);
+    } catch (err: any) {
+      console.error('[/api/news] error:', err);
+      res.status(500).json({ error: err?.message || 'Unable to load live local news.' });
+    }
+  });
+
+  apiRouter.post('/trip/guide', async (req: Request, res: Response) => {
+    try {
+      const { trip, model } = req.body || {};
+      if (!trip) {
+        res.status(400).json({ error: 'trip state is required.' });
+        return;
+      }
+      const result = await runTripProgressGuidance({ trip, model });
+      res.json(result);
+    } catch (err: any) {
+      console.error('[/api/trip/guide] error:', err);
+      res.status(500).json({ error: err?.message || 'Unable to generate during-trip guidance.' });
     }
   });
 

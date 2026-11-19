@@ -1,5 +1,7 @@
 import type {
   AIProviderId,
+  AreaNewsFeed,
+  AreaNewsItem,
   ChatTurnResponse,
   CostRealityCheckResult,
   GroupConsensus,
@@ -10,6 +12,7 @@ import type {
   LiveSuggestion,
   PlanBAlternative,
   SurprisePitch,
+  TripGuidance,
   TripPatch,
   TripWorkspace,
   WeatherSnapshot,
@@ -20,40 +23,76 @@ import {
   extractJsonObject,
   fetchOpenMeteoWeather,
   geocodePlace,
+  tavilyAreaNewsSearch,
   tavilySearch,
 } from './providers.js';
 import { getCurrencySymbol } from './storage.js';
 
 const CURRENT_YEAR = new Date().getFullYear();
 
+function hasValidCoords(lat?: number, lon?: number): boolean {
+  return (
+    typeof lat === 'number' &&
+    typeof lon === 'number' &&
+    Number.isFinite(lat) &&
+    Number.isFinite(lon) &&
+    Math.abs(lat) <= 90 &&
+    Math.abs(lon) <= 180 &&
+    (Math.abs(lat) > 0.01 || Math.abs(lon) > 0.01)
+  );
+}
+
+async function geocodeWithBudget<T>(promise: Promise<T>, fallback: T, ms = 2400): Promise<T> {
+  return Promise.race([
+    promise.catch(() => fallback),
+    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
+
 async function geocodeStopsBatch(
   days: ItineraryDay[],
   destinationContext: string
 ): Promise<ItineraryDay[]> {
-  const enrichedDays: ItineraryDay[] = [];
-  for (const day of days) {
-    const stops = await Promise.all(
-      (day.stops || []).map(async (stop, idx) => {
-        const safeId = stop.id || `stop-d${day.day}-${idx + 1}-${Date.now().toString(36)}`;
-        if (typeof stop.lat === 'number' && typeof stop.lon === 'number' && Math.abs(stop.lat) > 0.01) {
-          return { ...stop, id: safeId, day: day.day };
-        }
-        const searchLabel = stop.neighborhood
-          ? `${stop.title}, ${stop.neighborhood}`
-          : stop.title;
-        const geo = await geocodePlace(searchLabel, destinationContext);
-        return {
-          ...stop,
-          id: safeId,
-          day: day.day,
-          lat: geo?.lat,
-          lon: geo?.lon,
-        };
-      })
-    );
-    enrichedDays.push({ ...day, stops });
+  const missing: Array<{ dayIdx: number; stopIdx: number; query: string }> = [];
+  const normalizedDays: ItineraryDay[] = days.map((day, dIdx) => ({
+    ...day,
+    stops: (day.stops || []).map((stop, sIdx) => {
+      const safeId = stop.id || `stop-d${day.day}-${sIdx + 1}-${Date.now().toString(36)}`;
+      const cleaned: ItineraryStop = {
+        ...stop,
+        id: safeId,
+        day: day.day,
+        estimatedCost: Number(stop.estimatedCost) || 0,
+      };
+      if (!hasValidCoords(cleaned.lat, cleaned.lon) && missing.length < 6) {
+        const searchLabel = cleaned.neighborhood
+          ? `${cleaned.title}, ${cleaned.neighborhood}`
+          : cleaned.title;
+        missing.push({ dayIdx: dIdx, stopIdx: sIdx, query: searchLabel });
+      }
+      return cleaned;
+    }),
+  }));
+
+  if (missing.length === 0 || !destinationContext) {
+    return normalizedDays;
   }
-  return enrichedDays;
+
+  await geocodeWithBudget(
+    Promise.all(
+      missing.map(async (item) => {
+        const geo = await geocodePlace(item.query, destinationContext);
+        if (geo) {
+          normalizedDays[item.dayIdx].stops[item.stopIdx].lat = geo.lat;
+          normalizedDays[item.dayIdx].stops[item.stopIdx].lon = geo.lon;
+        }
+      })
+    ),
+    undefined,
+    2500
+  );
+
+  return normalizedDays;
 }
 
 function summarizeTripState(trip: Partial<TripWorkspace>): string {
@@ -61,23 +100,29 @@ function summarizeTripState(trip: Partial<TripWorkspace>): string {
     .map(
       (d) =>
         `Day ${d.day} (${d.title}): ${(d.stops || [])
-          .map((s) => `${s.timeWindow} ${s.title} [${s.indoorOutdoor}, ~${trip.currencySymbol || '$'}${s.estimatedCost}]`)
+          .map(
+            (s) =>
+              `[${s.status}] ${s.timeWindow} ${s.title} (${s.indoorOutdoor}, ~${trip.currencySymbol || '$'}${s.estimatedCost})`
+          )
           .join('; ')}`
     )
     .join('\n');
 
-  const customSummary = (trip.customSections || [])
-    .map((s) => `- ${s.title}`)
-    .join('\n');
+  const customSummary = (trip.customSections || []).map((s) => `- ${s.title}`).join('\n');
 
   const groupSummary = (trip.groupMembers || [])
     .map(
       (m) =>
-        `- ${m.name}: max ${trip.currencySymbol || '$'}${m.maxBudget}, pace=${m.pace}, interests=[${m.interests.join(', ')}], mustHaves=[${m.mustHaves.join(', ')}], vetoes=[${m.vetoes.join(', ')}]`
+        `- ${m.name}: max ${trip.currencySymbol || '$'}${m.maxBudget ?? 0}, pace=${m.pace || 'balanced'}, interests=[${(m.interests || []).join(', ')}], mustHaves=[${(m.mustHaves || []).join(', ')}], vetoes=[${(m.vetoes || []).join(', ')}]`
     )
     .join('\n');
 
   const spentTotal = (trip.expenses || []).reduce((acc, e) => acc + (Number(e.amount) || 0), 0);
+  const totalStops = (trip.days || []).reduce((s, d) => s + (d.stops?.length || 0), 0);
+  const completedStops = (trip.days || []).reduce(
+    (s, d) => s + (d.stops || []).filter((st) => st.status === 'completed').length,
+    0
+  );
 
   return `CURRENT TRIP WORKSPACE STATE:
 - Title: ${trip.title || 'Not set yet'}
@@ -89,6 +134,7 @@ function summarizeTripState(trip: Partial<TripWorkspace>): string {
 - Target Budget: ${trip.targetBudget ? `${trip.currencySymbol || '$'}${trip.targetBudget}` : 'Not set yet'}
 - Travelers: ${trip.travelersCount || 1}
 - Spent So Far: ${trip.currencySymbol || '$'}${spentTotal}
+- Progress: ${completedStops}/${totalStops} stops completed
 - Active Mode: ${trip.mode || 'planning'}
 - AI Local Friend Mode: ${trip.localFriendMode ? 'ON (speak like a savvy local resident, avoid tourist traps)' : 'OFF'}
 - Pace & Energy Profile: wake=${trip.paceProfile?.wakeWindow || 'balanced'}, pace=${trip.paceProfile?.pace || 'moderate'}, walking=${trip.paceProfile?.walkingTolerance || 'medium'}, restBuffer=${trip.paceProfile?.restBufferMinutes ?? 45}m
@@ -107,7 +153,6 @@ export async function runConversationalTurn(params: {
   const { trip, userMessage, model } = params;
   const allSources = [];
 
-  // Decide whether live Tavily search adds fresh facts
   const destHint = trip.destination || '';
   const searchNeeded =
     userMessage.length > 14 &&
@@ -118,7 +163,7 @@ export async function runConversationalTurn(params: {
     const queryBase = destHint
       ? `${destHint} ${userMessage.slice(0, 90)} ${trip.localFriendMode ? 'local hidden gems non-touristy' : ''} ${CURRENT_YEAR}`
       : `${userMessage.slice(0, 110)} travel guide prices ${CURRENT_YEAR}`;
-    const searchRes = await tavilySearch(queryBase, 5);
+    const searchRes = await tavilySearch(queryBase, 4);
     if (searchRes.contextText) {
       liveResearchBlock = `\nRECENT WEB RESEARCH (Tavily ${CURRENT_YEAR}):\n${searchRes.contextText}\n`;
       allSources.push(...searchRes.sources);
@@ -128,32 +173,34 @@ export async function runConversationalTurn(params: {
   const systemInstruction = `You are TripBuddy — a sharp, warm, globally knowledgeable AI travel companion and strategist (year ${CURRENT_YEAR}).
 
 CORE BEHAVIORAL RULES (STRICT):
-1. TALK FIRST BEFORE CONCLUDING: If the user gives a broad or incomplete trip request (missing destination, origin, rough budget/currency, duration, travel style, or group context) and has NOT explicitly asked you to "just build it now", DO NOT dump a full itinerary yet! Instead, react thoughtfully to what they shared, offer 1–2 smart observations, and ask 2–4 concise, high-leverage clarifying questions. Provide 3–4 clickable quickReplies so they can answer fast.
-2. NO RIGID PRE-MADE HEADINGS: Never output canned boilerplate headings like "Executive Summary / Accommodation / Visa / Packing List" unless the user actually asked for them. Write naturally like a human strategist. Only create or update customSections for specific topics the user asks about (e.g., "Specialty Coffee Map", "Vegan Street Food", "Rail Pass Breakdown", "Night Photography Spots").
-3. GLOBAL-FIRST & RECENT DATA: Never default to India or INR unless the user asks for India/INR. Match the user's stated currency or the destination's natural currency (USD/EUR/GBP/JPY/etc.). Ground prices, transit, and openings in the current ${CURRENT_YEAR} live web research provided.
-4. AI LOCAL FRIEND MODE: ${trip.localFriendMode ? 'CURRENTLY ACTIVE — Speak like a trusted local resident who lives in the destination. Steer away from overcrowded tourist traps and recommend neighborhood cafés, family-run eateries, underrated galleries, local transit hacks, and real etiquette.' : 'Currently off — give balanced, authentic travel advice (and mention they can toggle Local Friend Mode anytime).'}
+1. TALK FIRST BEFORE CONCLUDING: If the user gives a broad or incomplete trip request (missing destination, origin, rough budget/currency, duration, travel style, or group context) and has NOT explicitly asked you to "just build it now", DO NOT dump a full itinerary yet! Instead, react thoughtfully, offer 1–2 smart observations, and ask 2–4 concise clarifying questions. Provide 3–4 clickable quickReplies so they can answer fast.
+2. NO RIGID PRE-MADE HEADINGS: Never output canned boilerplate headings unless the user asked for them. Write naturally like a human strategist. Only create or update customSections for specific topics the user asks about.
+3. GLOBAL-FIRST & RECENT DATA: Never default to India or INR unless the user asks for India/INR. Match the user's stated currency or the destination's natural currency. Ground prices, transit, and openings in the current ${CURRENT_YEAR} live research provided.
+4. AI LOCAL FRIEND MODE: ${trip.localFriendMode ? 'CURRENTLY ACTIVE — Speak like a trusted local resident. Steer away from overcrowded tourist traps and recommend neighborhood cafés, family-run eateries, underrated galleries, local transit hacks, and real etiquette.' : 'Currently off — give balanced, authentic travel advice.'}
 5. ACTIVE MODE (${trip.mode === 'live' ? 'LIVE TRIP COMPANION' : 'PRE-TRIP PLANNING'}): ${
     trip.mode === 'live'
-      ? 'The traveler is currently ON THE TRIP. Be immediate, practical, and location/time/weather aware. Prioritize open venues, transit realism, instant swaps, and remaining-time optimization.'
+      ? 'The traveler is currently ON THE TRIP. Be immediate, practical, and location/time/weather aware.'
       : 'Help refine preferences, stress-test budget realism, optimize routes & energy pace, and build/update the itinerary interactively.'
   }
-6. RESPECT PACE & GROUP CONSTRAINTS: Always honor the Pace & Energy Profile (e.g., late risers NEVER get 7:00 AM starts; low walking tolerance minimizes long walks) and any Group Member vetoes or budget ceilings.
-7. REALISTIC COST REASONING: Never invent absurdly low budgets (like $200 for an international flight + 7-day hotel). If a user's budget looks unrealistic, gently flag it right in conversation and suggest they run the Cost Reality Check or explore smart swaps.
+6. RESPECT PACE & GROUP CONSTRAINTS: Honor Pace & Energy Profile and any Group Member vetoes or budget ceilings.
+7. REALISTIC COST REASONING & MAP COORDINATES: Always provide realistic market-grounded budget estimates AND accurate real-world decimal lat/lon coordinates for destination, stops, and hidden gems so the route map pins render immediately.
 
-OUTPUT FORMAT (STRICT JSON ONLY — NO MARKDOWN WRAPPER):
-Return a single valid JSON object matching this exact schema:
+OUTPUT FORMAT (STRICT JSON ONLY):
+Return a single valid JSON object:
 {
   "phase": "clarifying" | "planning" | "updating" | "live-guidance",
-  "reply": "Natural, helpful markdown conversational response to the user (no rigid boilerplate headings).",
+  "reply": "Natural, helpful markdown conversational response.",
   "quickReplies": ["Short clickable follow-up option 1", "Option 2", "Option 3"],
-  "appliedUpdates": ["Short plain-English note of each workspace change made, e.g. 'Added Day 1–4 Lisbon itinerary' or empty array if only clarifying"],
+  "appliedUpdates": ["Short plain-English note of each workspace change made, or empty array if clarifying"],
   "tripPatch": {
     "title": "Optional concise trip title",
     "origin": "Optional origin city",
     "destination": "Optional destination city",
     "country": "Optional country",
+    "lat": 38.7223,
+    "lon": -9.1393,
     "durationDays": 5,
-    "startDate": "Optional date or season string",
+    "startDate": "Optional date or season",
     "currency": "USD",
     "targetBudget": 2200,
     "travelersCount": 2,
@@ -175,6 +222,8 @@ Return a single valid JSON object matching this exact schema:
             "category": "food" | "stay" | "attraction" | "nature" | "culture" | "transit" | "hidden-gem" | "nightlife",
             "indoorOutdoor": "indoor" | "outdoor" | "mixed",
             "estimatedCost": 25,
+            "lat": 38.7117,
+            "lon": -9.1303,
             "status": "planned",
             "isHiddenGem": false
           }
@@ -182,7 +231,7 @@ Return a single valid JSON object matching this exact schema:
       }
     ],
     "upsertCustomSections": [
-      { "id": "sec-coffee", "title": "Specialty Coffee Spots", "contentMarkdown": "Markdown notes requested by the user" }
+      { "id": "sec-coffee", "title": "Specialty Coffee Spots", "contentMarkdown": "Markdown notes requested by user" }
     ],
     "addHiddenGems": [
       {
@@ -194,18 +243,17 @@ Return a single valid JSON object matching this exact schema:
         "bestTime": "Weekday late afternoon",
         "estimatedCost": 12,
         "insiderTip": "Specific local tip",
+        "lat": 38.713,
+        "lon": -9.142,
         "pinnedOnMap": true
       }
     ]
   }
 }
 
-IMPORTANT:
-- Only include fields inside "tripPatch" that are actually newly learned or modified in this turn!
-- If you are in the "clarifying" phase, omit "days" from "tripPatch" (you may still patch destination, origin, budget, currency, or durationDays if the user already mentioned them).
-- When building or updating "days", ALWAYS include the full updated array of days so nothing is accidentally dropped, using real specific venue/neighborhood names (never generic placeholders like "Local Restaurant").`;
+IMPORTANT: Only include fields inside "tripPatch" that are newly learned or modified. If clarifying, omit "days". When building or updating "days", include the full updated array of days with real venue names and real lat/lon.`;
 
-  const recentHistory = (trip.messages || []).slice(-10).map((m) => ({
+  const recentHistory = (trip.messages || []).slice(-8).map((m) => ({
     role: m.role,
     content: m.content,
   }));
@@ -218,6 +266,7 @@ IMPORTANT:
     messages: [...recentHistory, { role: 'user', content: statePrompt }],
     useSearchGrounding: model === 'gemini-4-hydrogen' && !liveResearchBlock,
     expectJson: true,
+    maxTokens: 2800,
   });
 
   allSources.push(...aiResult.groundingSources);
@@ -245,34 +294,24 @@ IMPORTANT:
     const countryName = patch.country || trip.country || '';
     const geoContext = [destName, countryName].filter(Boolean).join(', ');
 
-    // Geocode destination hub if newly set or changed
-    if (patch.destination && (patch.destination !== trip.destination || !trip.lat)) {
-      const destGeo = await geocodePlace(geoContext || patch.destination);
+    if (patch.destination && !hasValidCoords(patch.lat, patch.lon)) {
+      const destGeo = await geocodeWithBudget(geocodePlace(geoContext || patch.destination), null, 2000);
       if (destGeo) {
         patch.lat = destGeo.lat;
         patch.lon = destGeo.lon;
       }
     }
 
-    // Geocode itinerary stops for real Google Maps pins
     if (Array.isArray(patch.days) && patch.days.length > 0 && geoContext) {
       patch.days = await geocodeStopsBatch(patch.days, geoContext);
     }
 
-    // Geocode hidden gems if added
-    if (Array.isArray(patch.addHiddenGems) && patch.addHiddenGems.length > 0 && geoContext) {
-      patch.addHiddenGems = await Promise.all(
-        patch.addHiddenGems.map(async (gem, idx) => {
-          const geo = await geocodePlace(`${gem.title}, ${gem.neighborhood || ''}`, geoContext);
-          return {
-            ...gem,
-            id: gem.id || `gem-${Date.now()}-${idx}`,
-            pinnedOnMap: gem.pinnedOnMap ?? true,
-            lat: geo?.lat ?? gem.lat,
-            lon: geo?.lon ?? gem.lon,
-          };
-        })
-      );
+    if (Array.isArray(patch.addHiddenGems) && patch.addHiddenGems.length > 0) {
+      patch.addHiddenGems = patch.addHiddenGems.map((gem, idx) => ({
+        ...gem,
+        id: gem.id || `gem-${Date.now()}-${idx}`,
+        pinnedOnMap: gem.pinnedOnMap ?? true,
+      }));
     }
 
     if (Array.isArray(patch.upsertCustomSections)) {
@@ -307,7 +346,7 @@ export async function runWeatherFetch(params: {
   let lon = params.lon;
   const label = [params.destination, params.country].filter(Boolean).join(', ') || 'Current Location';
 
-  if (typeof lat !== 'number' || typeof lon !== 'number') {
+  if (!hasValidCoords(lat, lon)) {
     const geo = await geocodePlace(label);
     if (!geo) {
       throw new Error(`Could not locate "${label}" for weather data.`);
@@ -316,7 +355,239 @@ export async function runWeatherFetch(params: {
     lon = geo.lon;
   }
 
-  return fetchOpenMeteoWeather(lat, lon, label);
+  return fetchOpenMeteoWeather(lat as number, lon as number, label);
+}
+
+export async function runAreaNewsBrief(params: {
+  destination: string;
+  country?: string;
+  model?: AIProviderId;
+}): Promise<{ feed: AreaNewsFeed; modelUsed: string }> {
+  const locationName = [params.destination, params.country].filter(Boolean).join(', ').trim();
+  if (!locationName) {
+    throw new Error('Set a destination or current city to load live area news.');
+  }
+
+  const newsRes = await tavilyAreaNewsSearch(locationName);
+
+  const systemInstruction = `You are TripBuddy's Live Local News & Traveler Advisory Desk (${CURRENT_YEAR}).
+Analyze the real-time Tavily news articles below for ${locationName}.
+Distill up to 6 current, genuinely useful updates for a traveler in or heading to ${locationName} — covering transit disruptions, strikes, local festivals/events, weather advisories, attraction closures, or notable local news.
+CRITICAL: Only cite real URLs and publication names from the provided Tavily articles. Never invent fake URLs.
+
+Return ONLY valid JSON:
+{
+  "summary": "Crisp 1–2 sentence executive pulse on what is happening in ${locationName} right now for travelers.",
+  "items": [
+    {
+      "id": "news-1",
+      "title": "Concise headline",
+      "sourceName": "Domain or publication name from article",
+      "url": "Exact article URL from Tavily input",
+      "publishedDate": "Optional date string",
+      "category": "transit" | "events" | "weather" | "closure" | "safety" | "local",
+      "severity": "info" | "watch" | "alert",
+      "impactSummary": "1–2 sentences explaining what this means for a traveler right now",
+      "actionableAdvice": "Concrete action (e.g. 'Use metro line B instead' or 'Book tickets 24h early')"
+    }
+  ]
+}`;
+
+  const articlesPayload = newsRes.articles
+    .map(
+      (a, idx) =>
+        `[${idx + 1}] Source: ${a.sourceName} | Date: ${a.publishedDate || 'Recent'} | URL: ${a.url}\nTitle: ${a.title}\nSnippet: ${a.content}`
+    )
+    .join('\n\n');
+
+  const aiRes = await callAI({
+    model: params.model,
+    systemInstruction,
+    messages: [
+      {
+        role: 'user',
+        content: articlesPayload || `Provide general current travel awareness & seasonal advisories for ${locationName}.`,
+      },
+    ],
+    expectJson: true,
+    maxTokens: 1600,
+  });
+
+  const parsed = extractJsonObject<any>(aiRes.text);
+  const rawItems: any[] = Array.isArray(parsed?.items) ? parsed.items : [];
+
+  const items: AreaNewsItem[] = rawItems.slice(0, 6).map((item, idx) => ({
+    id: item.id || `news-${Date.now()}-${idx}`,
+    title: item.title || newsRes.articles[idx]?.title || 'Local update',
+    sourceName: item.sourceName || newsRes.articles[idx]?.sourceName || 'Trusted Source',
+    url: item.url || newsRes.articles[idx]?.url || '',
+    publishedDate: item.publishedDate || newsRes.articles[idx]?.publishedDate,
+    category: item.category || 'local',
+    severity: item.severity || 'info',
+    impactSummary: item.impactSummary || '',
+    actionableAdvice: item.actionableAdvice || undefined,
+  }));
+
+  return {
+    feed: {
+      locationName,
+      summary: parsed?.summary || `Latest verified local news and travel updates for ${locationName}.`,
+      items,
+      sources: dedupeSources([...newsRes.sources, ...aiRes.groundingSources]),
+      fetchedAt: new Date().toISOString(),
+    },
+    modelUsed: aiRes.modelUsed,
+  };
+}
+
+export async function runTripProgressGuidance(params: {
+  trip: TripWorkspace;
+  model?: AIProviderId;
+}): Promise<{
+  guidance: TripGuidance;
+  weather: WeatherSnapshot | null;
+  areaNews: AreaNewsFeed | null;
+  modelUsed: string;
+}> {
+  const { trip, model } = params;
+  const locationLabel =
+    trip.liveLocation?.label ||
+    [trip.destination, trip.country].filter(Boolean).join(', ');
+
+  if (!locationLabel) {
+    throw new Error('Set a destination or current location first so TripBuddy can guide you.');
+  }
+
+  // Fetch live weather + live Tavily area news in parallel for instant speed
+  const [weatherRes, newsRes] = await Promise.all([
+    trip.weather
+      ? Promise.resolve(trip.weather)
+      : runWeatherFetch({
+          destination: trip.destination || locationLabel,
+          country: trip.country,
+          lat: trip.liveLocation?.lat ?? trip.lat,
+          lon: trip.liveLocation?.lon ?? trip.lon,
+        }).catch(() => null),
+    tavilyAreaNewsSearch(locationLabel),
+  ]);
+
+  const allStops = trip.days.flatMap((d) => d.stops.map((s) => ({ ...s, day: d.day })));
+  const completedCount = allStops.filter((s) => s.status === 'completed').length;
+  const nextStop = allStops.find((s) => s.status !== 'completed');
+  const lastCompleted = [...allStops].reverse().find((s) => s.status === 'completed');
+
+  const spent = (trip.expenses || []).reduce((s, e) => s + (Number(e.amount) || 0), 0);
+  const remainingBudget = trip.targetBudget > 0 ? trip.targetBudget - spent : 0;
+
+  const systemInstruction = `You are TripBuddy's Active During-Trip Progress Guide (${CURRENT_YEAR}).
+Give the traveler crisp, real-time step-by-step guidance based on:
+- Exact trip progress (${completedCount}/${allStops.length} stops completed)
+- Next scheduled stop: ${nextStop ? `Day ${nextStop.day} · ${nextStop.timeWindow} · ${nextStop.title} (${nextStop.neighborhood || locationLabel})` : 'No remaining stops — suggest a fresh next move'}
+- Last completed stop: ${lastCompleted ? lastCompleted.title : 'Trip starting now'}
+- Live weather: ${weatherRes ? `${weatherRes.currentTemp}°C ${weatherRes.currentCondition}${weatherRes.isRaining ? ' (RAINING)' : ''}` : 'Unknown'}
+- Budget: target ${trip.currencySymbol}${trip.targetBudget || 'flexible'}, spent ${trip.currencySymbol}${spent}, remaining ${trip.currencySymbol}${remainingBudget}
+- Live Local News from Tavily (check for any transit strikes, closures, events, or alerts!)
+
+Return ONLY valid JSON:
+{
+  "headline": "Short urgent/encouraging 1-line status headline",
+  "nextAction": "Clear 2-sentence step-by-step guidance on what to do right now",
+  "transitTip": "Practical transit/walking/timing move to reach the next stop smoothly",
+  "budgetCheckNote": "1-sentence real-time budget pacing note",
+  "newsHeadsUp": "1–2 sentence synthesis of the latest local news/events/transit alerts in ${locationLabel}",
+  "quickActions": ["Short clickable action 1", "Action 2", "Action 3"],
+  "newsItems": [
+    {
+      "id": "n-1",
+      "title": "Headline",
+      "sourceName": "Trusted domain",
+      "url": "Exact URL from Tavily articles",
+      "category": "transit" | "events" | "weather" | "closure" | "safety" | "local",
+      "severity": "info" | "watch" | "alert",
+      "impactSummary": "1 sentence traveler impact",
+      "actionableAdvice": "Quick practical tip"
+    }
+  ]
+}`;
+
+  const articlesSnippet = newsRes.articles
+    .slice(0, 6)
+    .map(
+      (a, idx) =>
+        `[${idx + 1}] ${a.sourceName} (${a.publishedDate || 'Recent'}) | ${a.url} | ${a.title}: ${a.content}`
+    )
+    .join('\n');
+
+  const aiRes = await callAI({
+    model,
+    systemInstruction,
+    messages: [
+      {
+        role: 'user',
+        content: `${summarizeTripState(trip)}\n\nLIVE LOCAL NEWS ARTICLES:\n${articlesSnippet || 'No breaking disruptions reported.'}`,
+      },
+    ],
+    expectJson: true,
+    maxTokens: 1500,
+  });
+
+  const parsed = extractJsonObject<any>(aiRes.text);
+  const now = new Date().toISOString();
+  const sources = dedupeSources([...newsRes.sources, ...aiRes.groundingSources]);
+
+  const guidance: TripGuidance = {
+    headline: parsed?.headline || (nextStop ? `Up next: ${nextStop.title}` : `Ready to explore ${locationLabel}`),
+    nextAction:
+      parsed?.nextAction ||
+      (nextStop
+        ? `Head toward ${nextStop.title} in ${nextStop.neighborhood || locationLabel} for ${nextStop.timeWindow}.`
+        : `You have completed your scheduled stops — ask Live Companion for a spontaneous nearby gem.`),
+    currentStopTitle: lastCompleted?.title,
+    nextStopTitle: nextStop?.title,
+    transitTip: parsed?.transitTip || 'Check local transit departure times before heading out.',
+    budgetCheckNote:
+      parsed?.budgetCheckNote ||
+      (trip.targetBudget > 0
+        ? `You have ${trip.currencySymbol}${remainingBudget} remaining out of ${trip.currencySymbol}${trip.targetBudget}.`
+        : 'Log expenses in the Budget tab to track real-time pacing.'),
+    newsHeadsUp: parsed?.newsHeadsUp || 'No major local disruptions detected in recent news.',
+    quickActions: Array.isArray(parsed?.quickActions)
+      ? parsed.quickActions.slice(0, 3)
+      : [
+          nextStop ? `Give me a Plan B for ${nextStop.title}` : `Find a hidden café near ${locationLabel}`,
+          `Any transit delays or closures in ${locationLabel} right now?`,
+        ],
+    sources,
+    updatedAt: now,
+  };
+
+  let areaNews: AreaNewsFeed | null = trip.areaNews;
+  if (Array.isArray(parsed?.newsItems) && parsed.newsItems.length > 0) {
+    areaNews = {
+      locationName: locationLabel,
+      summary: guidance.newsHeadsUp,
+      items: parsed.newsItems.slice(0, 6).map((item: any, idx: number) => ({
+        id: item.id || `news-${Date.now()}-${idx}`,
+        title: item.title || newsRes.articles[idx]?.title || 'Local update',
+        sourceName: item.sourceName || newsRes.articles[idx]?.sourceName || 'Trusted Source',
+        url: item.url || newsRes.articles[idx]?.url || '',
+        publishedDate: newsRes.articles[idx]?.publishedDate,
+        category: item.category || 'local',
+        severity: item.severity || 'info',
+        impactSummary: item.impactSummary || '',
+        actionableAdvice: item.actionableAdvice,
+      })),
+      sources,
+      fetchedAt: now,
+    };
+  }
+
+  return {
+    guidance,
+    weather: weatherRes,
+    areaNews,
+    modelUsed: aiRes.modelUsed,
+  };
 }
 
 export async function runWeatherAdaptation(params: {
@@ -336,56 +607,47 @@ export async function runWeatherAdaptation(params: {
     throw new Error('Set a destination before running weather adaptation.');
   }
 
-  const weather = await runWeatherFetch({
-    destination: trip.destination,
-    country: trip.country,
-    lat: trip.lat,
-    lon: trip.lon,
-  });
-
-  const searchRes = await tavilySearch(
-    `best indoor activities museums cafes rainy day ${destinationContext} ${trip.localFriendMode ? 'local hidden gems' : ''} ${CURRENT_YEAR}`,
-    5
-  );
+  const [weather, searchRes] = await Promise.all([
+    runWeatherFetch({
+      destination: trip.destination,
+      country: trip.country,
+      lat: trip.lat,
+      lon: trip.lon,
+    }),
+    tavilySearch(
+      `best indoor activities museums cafes rainy day ${destinationContext} ${trip.localFriendMode ? 'local hidden gems' : ''} ${CURRENT_YEAR}`,
+      4
+    ),
+  ]);
 
   const weatherLines = weather.daily
     .map(
       (d, idx) =>
-        `Forecast Day ${idx + 1} (${d.date}): ${d.condition}, ${d.tempMin}–${d.tempMax}°C, precip=${d.precipitationProb}%, severity=${d.severity} (${d.advisory})`
+        `Forecast Day ${idx + 1} (${d.date}): ${d.condition}, ${d.tempMin}–${d.tempMax}°C, precip=${d.precipitationProb}%, severity=${d.severity}`
     )
     .join('\n');
 
   const systemInstruction = `You are TripBuddy's Smart Weather-Adaptive Itinerary Engine.
-Given the traveler's existing itinerary and real-time Open-Meteo 7-day forecast:
-- Identify outdoor stops scheduled on days with rain, storms, extreme heat (>=36°C), or high precipitation probability (>=45%).
-- Rearrange outdoor stops to clearer days when possible, OR replace exposed outdoor stops with nearby high-quality indoor alternatives (museums, covered markets, specialty cafés, galleries, bathhouses, culinary workshops) matching the user's budget (${trip.currencySymbol}${trip.targetBudget || 'flexible'}) and pace.
-- If weather is mostly clear, suggest proactive midday shade/comfort optimizations or keep outdoor highlights intact while marking any minor swaps.
-- Mark swapped stops with "status": "swapped".
+Rearrange or swap outdoor stops affected by rain, storms, or extreme heat (>=36°C) to high-quality indoor alternatives matching budget (${trip.currencySymbol}${trip.targetBudget || 'flexible'}). Mark swapped stops with "status": "swapped" and include real decimal lat/lon for every stop.
 
 Return ONLY valid JSON:
 {
   "summary": "Clear 2-sentence explanation of how the itinerary was adapted for the real forecast.",
-  "changes": ["Day 2 afternoon: Swapped outdoor viewpoint for Covered Market & Gallery due to 80% rain"],
-  "days": [ ...full updated ItineraryDay[] array preserving all days and stop fields... ]
+  "changes": ["Day 2 afternoon: Swapped outdoor viewpoint for Covered Market due to rain"],
+  "days": [ ...full updated ItineraryDay[] array... ]
 }`;
 
-  const prompt = `${summarizeTripState(trip)}
-
-REAL-TIME FORECAST FOR ${weather.locationName}:
-Current: ${weather.currentTemp}°C, ${weather.currentCondition}, Wind ${weather.currentWindKmh} km/h
-${weatherLines}
-
-INDOOR ALTERNATIVES RESEARCH:
-${searchRes.contextText}
-
-EXISTING ITINERARY JSON:
-${JSON.stringify(trip.days)}`;
+  const prompt = `Destination: ${destinationContext}
+Weather:\nCurrent: ${weather.currentTemp}°C ${weather.currentCondition}\n${weatherLines}
+Indoor Research:\n${searchRes.contextText}
+Existing Itinerary:\n${JSON.stringify(trip.days)}`;
 
   const aiRes = await callAI({
     model,
     systemInstruction,
     messages: [{ role: 'user', content: prompt }],
     expectJson: true,
+    maxTokens: 2600,
   });
 
   const parsed = extractJsonObject<any>(aiRes.text);
@@ -415,19 +677,20 @@ export async function runPlanBGenerator(params: {
   modelUsed: string;
 }> {
   const { trip, cancelledStop, reason, model } = params;
-  const destinationContext = [trip.destination, trip.country].filter(Boolean).join(', ') || trip.liveLocation?.label || '';
+  const destinationContext =
+    [trip.destination, trip.country].filter(Boolean).join(', ') || trip.liveLocation?.label || '';
   if (!destinationContext) {
     throw new Error('Please set a destination or current location first to generate a Plan B.');
   }
 
   const neighborhood = cancelledStop?.neighborhood || trip.liveLocation?.label || destinationContext;
-  const searchQuery = `open now alternatives near ${neighborhood} ${destinationContext} ${reason} ${trip.localFriendMode ? 'local hidden gem' : ''} ${CURRENT_YEAR}`;
-  const searchRes = await tavilySearch(searchQuery, 5);
+  const searchRes = await tavilySearch(
+    `open alternatives near ${neighborhood} ${destinationContext} ${reason} ${trip.localFriendMode ? 'local hidden gem' : ''} ${CURRENT_YEAR}`,
+    4
+  );
 
   const systemInstruction = `You are TripBuddy's Instant Plan B Generator.
-A traveler's activity, attraction, or restaurant just got cancelled, closed, sold out, or disrupted by weather.
-Suggest 3 realistic, specific, currently-operating nearby replacements in ${destinationContext} (ideally near ${neighborhood}) matching the traveler's currency (${trip.currency || 'USD'}) and vibe.
-${trip.localFriendMode ? 'AI Local Friend Mode is ON: prioritize genuine non-touristy neighborhood spots.' : ''}
+Suggest 3 realistic, specific nearby replacements in ${destinationContext} (near ${neighborhood}) in currency ${trip.currency || 'USD'}. Include accurate decimal lat/lon for each alternative.
 
 Return ONLY valid JSON:
 {
@@ -435,45 +698,61 @@ Return ONLY valid JSON:
   "alternatives": [
     {
       "id": "planb-1",
-      "title": "Real specific venue or experience name",
-      "neighborhood": "Neighborhood name",
+      "title": "Real specific venue name",
+      "neighborhood": "Neighborhood",
       "category": "food" | "culture" | "attraction" | "nature" | "hidden-gem" | "nightlife",
       "indoorOutdoor": "indoor" | "outdoor" | "mixed",
       "estimatedCost": 20,
       "reason": "Why this is an ideal immediate swap",
-      "openStatus": "Typically open midday–late evening (verify live hours)"
+      "openStatus": "Typical hours / availability note",
+      "lat": 38.712,
+      "lon": -9.139
     }
   ]
 }`;
 
   const prompt = `Destination: ${destinationContext}
-Cancelled/Disrupted Stop: ${cancelledStop?.title || 'Ad-hoc activity'} (${cancelledStop?.category || 'general'}, est. ${trip.currencySymbol || '$'}${cancelledStop?.estimatedCost ?? 0})
-Issue / Reason: ${reason}
-Current Weather: ${trip.weather ? `${trip.weather.currentTemp}°C ${trip.weather.currentCondition}` : 'Unknown'}
-Live Web Research:
-${searchRes.contextText}`;
+Cancelled Stop: ${cancelledStop?.title || 'Ad-hoc activity'} (${cancelledStop?.category || 'general'})
+Issue: ${reason}
+Weather: ${trip.weather ? `${trip.weather.currentTemp}°C ${trip.weather.currentCondition}` : 'Unknown'}
+Live Research:\n${searchRes.contextText}`;
 
   const aiRes = await callAI({
     model,
     systemInstruction,
     messages: [{ role: 'user', content: prompt }],
     expectJson: true,
+    maxTokens: 1200,
   });
 
   const parsed = extractJsonObject<any>(aiRes.text);
   const rawAlts: PlanBAlternative[] = Array.isArray(parsed?.alternatives) ? parsed.alternatives : [];
 
-  const alternatives = await Promise.all(
-    rawAlts.slice(0, 3).map(async (alt, idx) => {
-      const geo = await geocodePlace(`${alt.title}, ${alt.neighborhood || ''}`, destinationContext);
-      return {
-        ...alt,
-        id: alt.id || `planb-${Date.now()}-${idx}`,
-        estimatedCost: Number(alt.estimatedCost) || 0,
-        lat: geo?.lat,
-        lon: geo?.lon,
-      };
-    })
+  const alternatives = await geocodeWithBudget(
+    Promise.all(
+      rawAlts.slice(0, 3).map(async (alt, idx) => {
+        let lat = alt.lat;
+        let lon = alt.lon;
+        if (!hasValidCoords(lat, lon)) {
+          const geo = await geocodePlace(`${alt.title}, ${alt.neighborhood || ''}`, destinationContext);
+          lat = geo?.lat;
+          lon = geo?.lon;
+        }
+        return {
+          ...alt,
+          id: alt.id || `planb-${Date.now()}-${idx}`,
+          estimatedCost: Number(alt.estimatedCost) || 0,
+          lat,
+          lon,
+        };
+      })
+    ),
+    rawAlts.slice(0, 3).map((alt, idx) => ({
+      ...alt,
+      id: alt.id || `planb-${Date.now()}-${idx}`,
+      estimatedCost: Number(alt.estimatedCost) || 0,
+    })),
+    2200
   );
 
   return {
@@ -501,53 +780,51 @@ export async function runLiveSuggestions(params: {
 }> {
   const { trip, locationLabel, remainingHours, mood, model } = params;
   const targetPlace = locationLabel || [trip.destination, trip.country].filter(Boolean).join(', ');
-  if (!targetPlace && (typeof params.lat !== 'number' || typeof params.lon !== 'number')) {
+  if (!targetPlace && !hasValidCoords(params.lat, params.lon)) {
     throw new Error('Provide a current city, neighborhood, or GPS location for live suggestions.');
   }
 
-  let weather: WeatherSnapshot | null = null;
-  try {
-    weather = await runWeatherFetch({
+  // Run weather + Tavily search in parallel
+  const [weather, searchRes] = await Promise.all([
+    runWeatherFetch({
       destination: targetPlace,
       lat: params.lat ?? trip.lat,
       lon: params.lon ?? trip.lon,
-    });
-  } catch {
-    weather = trip.weather || null;
-  }
+    }).catch(() => trip.weather || null),
+    tavilySearch(
+      `things to do right now near ${targetPlace} ${mood || ''} ${trip.localFriendMode ? 'local cafes hidden gems non-touristy' : 'top nearby spots'} ${CURRENT_YEAR}`,
+      4
+    ),
+  ]);
 
   const spent = (trip.expenses || []).reduce((s, e) => s + (Number(e.amount) || 0), 0);
   const remainingBudget = trip.targetBudget ? Math.max(0, trip.targetBudget - spent) : 0;
 
-  const searchRes = await tavilySearch(
-    `things to do right now near ${targetPlace} ${mood || ''} ${trip.localFriendMode ? 'local cafes hidden gems non-touristy' : 'top nearby spots'} ${CURRENT_YEAR}`,
-    5
-  );
-
   const systemInstruction = `You are TripBuddy's Live Trip Companion assisting a traveler ON THE GROUND right now.
-Recommend 4 actionable, nearby moves tailored to:
-- Current location: ${targetPlace}
-- Remaining free time today: ${remainingHours} hours
-- Live weather: ${weather ? `${weather.currentTemp}°C, ${weather.currentCondition}${weather.isRaining ? ' (RAINING — prioritize indoor/sheltered stops!)' : ''}` : 'Unknown'}
+Recommend 4 actionable nearby moves tailored to:
+- Location: ${targetPlace}
+- Free time: ${remainingHours}h
+- Weather: ${weather ? `${weather.currentTemp}°C, ${weather.currentCondition}${weather.isRaining ? ' (RAINING — prioritize indoor stops!)' : ''}` : 'Unknown'}
 - Remaining budget: ${trip.targetBudget ? `${trip.currencySymbol || '$'}${remainingBudget} ${trip.currency || 'USD'}` : 'Flexible'}
-- Energy & walking tolerance: pace=${trip.paceProfile?.pace || 'moderate'}, walking=${trip.paceProfile?.walkingTolerance || 'medium'}
-- Mood / request: ${mood || 'Best use of the next few hours'}
-- Local Friend Mode: ${trip.localFriendMode ? 'ON — avoid tourist traps, suggest authentic local haunts.' : 'OFF'}
+- Mood: ${mood || 'Best use of the next few hours'}
+- Local Friend Mode: ${trip.localFriendMode ? 'ON — avoid tourist traps' : 'OFF'}
 
-Return ONLY valid JSON:
+Return ONLY valid JSON with accurate decimal lat/lon:
 {
   "summary": "Brief, practical on-the-ground advice (1–2 sentences).",
   "suggestions": [
     {
       "id": "live-1",
-      "title": "Real specific place or experience",
+      "title": "Real specific place",
       "neighborhood": "Area / district",
       "category": "food" | "culture" | "attraction" | "nature" | "hidden-gem" | "nightlife",
       "indoorOutdoor": "indoor" | "outdoor" | "mixed",
       "estimatedMinutes": 75,
       "estimatedCost": 18,
-      "whyNow": "Why this fits the exact time window and current weather",
-      "localTip": "Actionable insider tip (best seat, what to order, timing)"
+      "whyNow": "Why this fits the exact time window and weather",
+      "localTip": "Actionable insider tip",
+      "lat": 38.712,
+      "lon": -9.139
     }
   ]
 }`;
@@ -555,26 +832,20 @@ Return ONLY valid JSON:
   const aiRes = await callAI({
     model,
     systemInstruction,
-    messages: [{ role: 'user', content: `Live web research:\n${searchRes.contextText || 'Use current verified local knowledge.'}` }],
+    messages: [{ role: 'user', content: `Live web research:\n${searchRes.contextText || 'Use verified local knowledge.'}` }],
     expectJson: true,
+    maxTokens: 1300,
   });
 
   const parsed = extractJsonObject<any>(aiRes.text);
   const rawList: LiveSuggestion[] = Array.isArray(parsed?.suggestions) ? parsed.suggestions : [];
 
-  const suggestions = await Promise.all(
-    rawList.slice(0, 4).map(async (item, idx) => {
-      const geo = await geocodePlace(`${item.title}, ${item.neighborhood || ''}`, targetPlace);
-      return {
-        ...item,
-        id: item.id || `live-${Date.now()}-${idx}`,
-        estimatedMinutes: Number(item.estimatedMinutes) || 60,
-        estimatedCost: Number(item.estimatedCost) || 0,
-        lat: geo?.lat,
-        lon: geo?.lon,
-      };
-    })
-  );
+  const suggestions = rawList.slice(0, 4).map((item, idx) => ({
+    ...item,
+    id: item.id || `live-${Date.now()}-${idx}`,
+    estimatedMinutes: Number(item.estimatedMinutes) || 60,
+    estimatedCost: Number(item.estimatedCost) || 0,
+  }));
 
   return {
     weather,
@@ -605,21 +876,21 @@ export async function runCostRealityCheck(params: {
   const origin = trip.origin || 'Major international hub';
 
   const [flightSearch, dailyCostSearch] = await Promise.all([
-    tavilySearch(`average round trip flight cost ${origin} to ${destination} ${currency} ${CURRENT_YEAR}`, 4),
-    tavilySearch(`${destination} average daily travel cost hotel food transport ${currency} ${CURRENT_YEAR}`, 5),
+    tavilySearch(`round trip flight cost ${origin} to ${destination} ${currency} ${CURRENT_YEAR}`, 3),
+    tavilySearch(`${destination} average daily travel cost hotel food transport ${currency} ${CURRENT_YEAR}`, 4),
   ]);
 
   const sources = dedupeSources([...flightSearch.sources, ...dailyCostSearch.sources]);
 
   const systemInstruction = `You are TripBuddy's AI Trip Cost Reality Check Auditor (${CURRENT_YEAR}).
-Be ruthlessly honest, practical, and grounded in REAL ${CURRENT_YEAR} pricing — never flatter an unrealistic budget!
-Evaluate whether ${currencySymbol}${userBudget} ${currency} is realistic for ${travelers} traveler(s) spending ${duration} days in ${destination} departing from ${origin}.
+Be ruthlessly honest and grounded in REAL ${CURRENT_YEAR} pricing.
+Evaluate whether ${currencySymbol}${userBudget} ${currency} is realistic for ${travelers} traveler(s) spending ${duration} days in ${destination} from ${origin}.
 
 Return ONLY valid JSON:
 {
   "verdict": "realistic" | "tight" | "unrealistic",
   "headline": "Sharp, honest 1-line assessment",
-  "summary": "2–3 sentences diagnosing what is realistic vs. underestimated based on real ${CURRENT_YEAR} prices.",
+  "summary": "2–3 sentences diagnosing what is realistic vs. underestimated.",
   "recommendedMinimum": 1800,
   "comfortableEstimate": 2600,
   "categories": [
@@ -638,29 +909,25 @@ Return ONLY valid JSON:
       "id": "swap-1",
       "title": "Concrete money-saving tactic",
       "estimatedSavings": 240,
-      "description": "Specific neighborhood, transit pass, or booking swap that saves real money without ruining the trip.",
+      "description": "Specific swap that saves real money.",
       "actionPrompt": "Apply this exact cost-saving swap to my trip itinerary and budget: ..."
     }
   ]
 }
-Include all 5 categories: flights, stay, food, activities, misc. All numeric values must be in ${currency} for ALL ${travelers} traveler(s) combined.`;
+Include all 5 categories: flights, stay, food, activities, misc. All figures in ${currency} for ALL ${travelers} traveler(s) combined.`;
 
   const prompt = `Trip: ${origin} -> ${destination}, ${duration} days, ${travelers} traveler(s)
-User Target Budget: ${currencySymbol}${userBudget} ${currency}
-Current Estimated Breakdown: ${JSON.stringify(trip.budgetEstimate || {})}
-
-LIVE FLIGHT PRICING RESEARCH (${CURRENT_YEAR}):
-${flightSearch.contextText}
-
-LIVE DESTINATION DAILY COST RESEARCH (${CURRENT_YEAR}):
-${dailyCostSearch.contextText}`;
+Target Budget: ${currencySymbol}${userBudget} ${currency}
+Estimated Breakdown: ${JSON.stringify(trip.budgetEstimate || {})}
+Flight Pricing:\n${flightSearch.contextText}
+Daily Cost Research:\n${dailyCostSearch.contextText}`;
 
   const aiRes = await callAI({
     model,
     systemInstruction,
     messages: [{ role: 'user', content: prompt }],
-    useSearchGrounding: model === 'gemini-4-hydrogen' && sources.length === 0,
     expectJson: true,
+    maxTokens: 1600,
   });
 
   const parsed = extractJsonObject<any>(aiRes.text);
@@ -707,10 +974,11 @@ export async function runGroupSynthesis(params: {
     throw new Error('Add at least 2 group members to synthesize a group consensus itinerary.');
   }
 
-  const destinationContext = [trip.destination, trip.country].filter(Boolean).join(', ') || 'a mutually suitable global destination';
+  const destinationContext =
+    [trip.destination, trip.country].filter(Boolean).join(', ') || 'a mutually suitable global destination';
   const searchRes = await tavilySearch(
-    `group travel itinerary ${destinationContext} diverse interests ${members.flatMap((m) => m.interests).slice(0, 6).join(' ')} ${CURRENT_YEAR}`,
-    5
+    `group travel itinerary ${destinationContext} ${members.flatMap((m) => m.interests || []).slice(0, 5).join(' ')} ${CURRENT_YEAR}`,
+    4
   );
 
   const budgets = members.map((m) => Number(m.maxBudget) || 0).filter((b) => b > 0);
@@ -718,42 +986,33 @@ export async function runGroupSynthesis(params: {
   const duration = Math.max(2, trip.durationDays || 4);
 
   const systemInstruction = `You are TripBuddy's Group Travel Decision Maker.
-You must combine ${members.length} travelers' distinct budgets, paces, interests, must-haves, and strict vetoes into ONE fair, joyful itinerary for ${destinationContext} (${duration} days) that everyone agrees on.
-CRITICAL RULES:
-- Respect every member's VETOES strictly — never include vetoed activities.
-- Keep per-person costs within the group's shared budget ceiling (${trip.currencySymbol}${sharedCeiling} ${trip.currency} per person) OR clearly mark optional split blocks so lower-budget travelers aren't pressured.
-- Use smart split-afternoon or dual-option blocks when pace or interests diverge strongly.
+Combine ${members.length} travelers' budgets, paces, interests, must-haves, and strict vetoes into ONE fair itinerary for ${destinationContext} (${duration} days).
+Strictly honor all VETOES and respect the shared ceiling (${trip.currencySymbol}${sharedCeiling} ${trip.currency}/person). Include real decimal lat/lon for every stop.
 
 Return ONLY valid JSON:
 {
-  "reply": "Warm, clear explanation to the group explaining how you balanced everyone's priorities.",
+  "reply": "Clear explanation to the group explaining how you balanced everyone's priorities.",
   "consensus": {
     "summary": "2-sentence overview of the group strategy.",
     "sharedBudgetCeiling": ${sharedCeiling},
     "commonInterests": ["Overlap 1", "Overlap 2"],
-    "tradeoffsResolved": ["How conflict 1 was solved fairly", "How conflict 2 was solved"],
-    "memberNotes": [
-      { "name": "Member Name", "satisfiedBy": "Which days/stops deliver their top priorities while respecting vetoes" }
-    ]
+    "tradeoffsResolved": ["How conflict 1 was solved fairly"],
+    "memberNotes": [{ "name": "Member Name", "satisfiedBy": "Which stops deliver their priorities" }]
   },
   "budgetEstimate": { "flights": 0, "stay": 0, "food": 0, "activities": 0, "misc": 0 },
-  "days": [ ...full ItineraryDay[] array with real specific places... ]
+  "days": [ ...full ItineraryDay[] array with real places and lat/lon... ]
 }`;
 
-  const prompt = `Destination: ${destinationContext}
-Duration: ${duration} days
-Currency: ${trip.currency} (${trip.currencySymbol})
-Group Members:
-${JSON.stringify(members, null, 2)}
-
-Live Research:
-${searchRes.contextText}`;
+  const prompt = `Destination: ${destinationContext}, ${duration} days, ${trip.currency} (${trip.currencySymbol})
+Members:\n${JSON.stringify(members)}
+Live Research:\n${searchRes.contextText}`;
 
   const aiRes = await callAI({
     model,
     systemInstruction,
     messages: [{ role: 'user', content: prompt }],
     expectJson: true,
+    maxTokens: 2600,
   });
 
   const parsed = extractJsonObject<any>(aiRes.text);
@@ -797,21 +1056,19 @@ export async function runSurpriseMe(params: {
   const sym = getCurrencySymbol(currency);
 
   const searchRes = await tavilySearch(
-    `underrated unexpected travel destinations from ${origin || 'anywhere'} ${durationDays} days ${vibe} ${personality} travel deals ${CURRENT_YEAR}`,
-    6
+    `underrated unexpected travel destinations from ${origin || 'anywhere'} ${durationDays} days ${vibe} ${CURRENT_YEAR}`,
+    4
   );
 
   const systemInstruction = `You are TripBuddy's Surprise Me Mode Global Destination Scout (${CURRENT_YEAR}).
-Suggest 3 UNEXPECTED, genuinely exciting global destinations (avoid overly cliché obvious defaults unless a unique angle makes them fit) tailored to:
-- Departing from: ${origin || 'Flexible global origin'}
-- Available days: ${durationDays} days
-- Target budget: ${sym}${budget} ${currency}
-- Travel personality: ${personality}
-- Preferred vibe / interests: ${vibe}
+Suggest 3 UNEXPECTED, cost-checked global destinations for:
+- Origin: ${origin || 'Flexible global origin'}
+- Days: ${durationDays}
+- Budget: ${sym}${budget} ${currency}
+- Personality: ${personality}
+- Vibe: ${vibe}
 
-Make sure every destination is realistically achievable within ${durationDays} days and roughly within ${sym}${budget} ${currency} (accounting for travel distance from ${origin || 'major hubs'}).
-
-Return ONLY valid JSON:
+Return ONLY valid JSON including accurate decimal lat/lon for each city:
 {
   "pitches": [
     {
@@ -822,9 +1079,11 @@ Return ONLY valid JSON:
       "estimatedTotal": 1450,
       "currency": "${currency}",
       "durationDays": ${durationDays},
-      "whyItFits": "2 sentences linking their exact personality, budget, and travel time from origin",
-      "highlights": ["Specific unique highlight 1", "Highlight 2", "Highlight 3"],
-      "seasonNote": "Current seasonal/weather & crowd insight"
+      "whyItFits": "2 sentences linking personality, budget, and travel distance",
+      "highlights": ["Specific highlight 1", "Highlight 2", "Highlight 3"],
+      "seasonNote": "Current seasonal/crowd insight",
+      "lat": 41.1579,
+      "lon": -8.6291
     }
   ]
 }`;
@@ -832,33 +1091,29 @@ Return ONLY valid JSON:
   const aiRes = await callAI({
     model,
     systemInstruction,
-    messages: [{ role: 'user', content: `Live global travel trends:\n${searchRes.contextText}` }],
+    messages: [{ role: 'user', content: `Live travel trends:\n${searchRes.contextText}` }],
     expectJson: true,
+    maxTokens: 1300,
   });
 
   const parsed = extractJsonObject<any>(aiRes.text);
   const rawPitches: any[] = Array.isArray(parsed?.pitches) ? parsed.pitches : [];
 
-  const pitches: SurprisePitch[] = await Promise.all(
-    rawPitches.slice(0, 3).map(async (p, idx) => {
-      const geo = await geocodePlace(`${p.destination}, ${p.country}`);
-      return {
-        id: p.id || `surprise-${Date.now()}-${idx}`,
-        destination: p.destination || 'Unexpected Escape',
-        country: p.country || '',
-        tagline: p.tagline || '',
-        estimatedTotal: Number(p.estimatedTotal) || budget,
-        currency: p.currency || currency,
-        currencySymbol: getCurrencySymbol(p.currency || currency),
-        durationDays: Number(p.durationDays) || durationDays,
-        whyItFits: p.whyItFits || '',
-        highlights: Array.isArray(p.highlights) ? p.highlights : [],
-        seasonNote: p.seasonNote || '',
-        lat: geo?.lat,
-        lon: geo?.lon,
-      };
-    })
-  );
+  const pitches: SurprisePitch[] = rawPitches.slice(0, 3).map((p, idx) => ({
+    id: p.id || `surprise-${Date.now()}-${idx}`,
+    destination: p.destination || 'Unexpected Escape',
+    country: p.country || '',
+    tagline: p.tagline || '',
+    estimatedTotal: Number(p.estimatedTotal) || budget,
+    currency: p.currency || currency,
+    currencySymbol: getCurrencySymbol(p.currency || currency),
+    durationDays: Number(p.durationDays) || durationDays,
+    whyItFits: p.whyItFits || '',
+    highlights: Array.isArray(p.highlights) ? p.highlights : [],
+    seasonNote: p.seasonNote || '',
+    lat: hasValidCoords(p.lat, p.lon) ? Number(p.lat) : undefined,
+    lon: hasValidCoords(p.lat, p.lon) ? Number(p.lon) : undefined,
+  }));
 
   return {
     pitches,
@@ -887,27 +1142,28 @@ export async function runLocalGemsDiscovery(params: {
 
   const searchRes = await tavilySearch(
     `hidden gems locals love ${place} underrated cafes local food non-touristy ${focus || ''} ${CURRENT_YEAR}`,
-    6
+    5
   );
 
-  const systemInstruction = `You are acting in AI LOCAL FRIEND MODE — a warm, plugged-in local resident of ${place}.
-Recommend 6 genuine, real, underrated non-touristy spots (hidden cafés, neighborhood food joints, quiet viewpoints, independent galleries, evening hangouts, or artisan walks) in ${place}.
-Focus requested: ${focus || 'Mix of cafés, local food, neighborhood walks, and underrated culture'}.
-Exclude generic top-3 tourist traps. Use real venue & neighborhood names. Estimate costs in ${currency}.
+  const systemInstruction = `You are acting in AI LOCAL FRIEND MODE — a plugged-in local resident of ${place}.
+Recommend 6 genuine, real, underrated non-touristy spots in ${place} focused on: ${focus || 'hidden cafés, local food, neighborhood walks'}.
+Estimate costs in ${currency}. Include accurate decimal lat/lon for every venue so it pins immediately on the map.
 
 Return ONLY valid JSON:
 {
-  "localIntro": "Warm 2-sentence note from a local friend sharing how to feel the real rhythm of ${place}.",
+  "localIntro": "Warm 2-sentence note from a local friend.",
   "gems": [
     {
       "id": "gem-1",
-      "title": "Real specific venue or spot name",
-      "neighborhood": "Specific neighborhood",
+      "title": "Real venue name",
+      "neighborhood": "Neighborhood",
       "category": "hidden-gem" | "food" | "culture" | "nature" | "nightlife",
-      "whyLocalsLoveIt": "What makes locals actually go here",
-      "bestTime": "Exact best time/day to visit",
+      "whyLocalsLoveIt": "Authentic reason",
+      "bestTime": "Best time to visit",
       "estimatedCost": 15,
-      "insiderTip": "Specific local move (what to order, side entrance, nearby street)",
+      "insiderTip": "Specific local move",
+      "lat": 38.713,
+      "lon": -9.142,
       "pinnedOnMap": true
     }
   ]
@@ -916,31 +1172,27 @@ Return ONLY valid JSON:
   const aiRes = await callAI({
     model,
     systemInstruction,
-    messages: [{ role: 'user', content: `Recent local discoveries web search:\n${searchRes.contextText}` }],
+    messages: [{ role: 'user', content: `Recent local discoveries:\n${searchRes.contextText}` }],
     expectJson: true,
+    maxTokens: 1500,
   });
 
   const parsed = extractJsonObject<any>(aiRes.text);
   const rawGems: any[] = Array.isArray(parsed?.gems) ? parsed.gems : [];
 
-  const gems: HiddenGemItem[] = await Promise.all(
-    rawGems.slice(0, 6).map(async (g, idx) => {
-      const geo = await geocodePlace(`${g.title}, ${g.neighborhood || ''}`, place);
-      return {
-        id: g.id || `gem-${Date.now()}-${idx}`,
-        title: g.title,
-        neighborhood: g.neighborhood || place,
-        category: g.category || 'hidden-gem',
-        whyLocalsLoveIt: g.whyLocalsLoveIt || '',
-        bestTime: g.bestTime || 'Late afternoon',
-        estimatedCost: Number(g.estimatedCost) || 0,
-        insiderTip: g.insiderTip || '',
-        lat: geo?.lat,
-        lon: geo?.lon,
-        pinnedOnMap: true,
-      };
-    })
-  );
+  const gems: HiddenGemItem[] = rawGems.slice(0, 6).map((g, idx) => ({
+    id: g.id || `gem-${Date.now()}-${idx}`,
+    title: g.title,
+    neighborhood: g.neighborhood || place,
+    category: g.category || 'hidden-gem',
+    whyLocalsLoveIt: g.whyLocalsLoveIt || '',
+    bestTime: g.bestTime || 'Late afternoon',
+    estimatedCost: Number(g.estimatedCost) || 0,
+    insiderTip: g.insiderTip || '',
+    lat: hasValidCoords(g.lat, g.lon) ? Number(g.lat) : undefined,
+    lon: hasValidCoords(g.lat, g.lon) ? Number(g.lon) : undefined,
+    pinnedOnMap: true,
+  }));
 
   return {
     gems,

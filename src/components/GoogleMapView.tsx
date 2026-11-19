@@ -10,10 +10,10 @@ import {
 import {
   RotateCcw,
   ExternalLink,
-  Compass,
   MapPin,
+  Loader2,
 } from 'lucide-react';
-import { HiddenGemItem, ItineraryDay, ItineraryStop, LiveSuggestion } from '../types';
+import { HiddenGemItem, ItineraryDay, LiveSuggestion } from '../types';
 import { formatMoney } from '../lib/storage';
 
 export interface MapPinPoint {
@@ -56,7 +56,7 @@ const RoutePolyline: React.FC<{ coordinates: google.maps.LatLngLiteral[] }> = ({
       path: coordinates,
       geodesic: true,
       strokeColor: '#22D3EE',
-      strokeOpacity: 0.75,
+      strokeOpacity: 0.8,
       strokeWeight: 3,
       map,
     });
@@ -114,31 +114,62 @@ export const GoogleMapView: React.FC<GoogleMapViewProps> = ({
   onSelectPin,
   compact = false,
 }) => {
-  const [activeApiKey, setActiveApiKey] = useState<string>(
-    ((import.meta as any).env?.VITE_GOOGLE_MAPS_API_KEY as string) || ''
-  );
+  const envKey = (((import.meta as any).env?.VITE_GOOGLE_MAPS_API_KEY as string) || '').trim();
+  const [activeApiKey, setActiveApiKey] = useState<string>(envKey);
+  const [keyChecked, setKeyChecked] = useState<boolean>(Boolean(envKey));
+  const [googleAuthFailed, setGoogleAuthFailed] = useState<boolean>(false);
   const [selectedDay, setSelectedDay] = useState<number | 'all'>('all');
   const [showGems, setShowGems] = useState<boolean>(true);
   const [selectedPin, setSelectedPin] = useState<MapPinPoint | null>(null);
   const [fitTrigger, setFitTrigger] = useState(0);
 
+  // Fetch API key dynamically from backend if not baked into Vite env
   useEffect(() => {
-    if (!activeApiKey) {
-      fetch('/api/maps-key')
-        .then((res) => (res.ok ? res.json() : { key: '' }))
-        .then((data) => {
-          if (data.key) setActiveApiKey(data.key);
-        })
-        .catch(() => {});
+    if (activeApiKey) {
+      setKeyChecked(true);
+      return;
     }
+    let cancelled = false;
+    fetch('/api/maps-key')
+      .then((res) => (res.ok ? res.text() : ''))
+      .then((raw) => {
+        if (cancelled) return;
+        try {
+          const parsed = raw ? JSON.parse(raw) : {};
+          if (parsed.key && typeof parsed.key === 'string') {
+            setActiveApiKey(parsed.key.trim());
+          }
+        } catch {
+          // ignore non-JSON fallback
+        }
+        setKeyChecked(true);
+      })
+      .catch(() => {
+        if (!cancelled) setKeyChecked(true);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [activeApiKey]);
+
+  // Listen for Google Maps auth / referrer failure so map seamlessly falls back to OSM embed
+  useEffect(() => {
+    const prevHandler = (window as any).gm_authFailure;
+    (window as any).gm_authFailure = () => {
+      setGoogleAuthFailed(true);
+      if (typeof prevHandler === 'function') prevHandler();
+    };
+    return () => {
+      (window as any).gm_authFailure = prevHandler;
+    };
+  }, []);
 
   const allPins = useMemo<MapPinPoint[]>(() => {
     const list: MapPinPoint[] = [];
 
     for (const day of days) {
       for (const stop of day.stops || []) {
-        if (typeof stop.lat === 'number' && typeof stop.lon === 'number') {
+        if (typeof stop.lat === 'number' && typeof stop.lon === 'number' && Number.isFinite(stop.lat)) {
           list.push({
             id: stop.id,
             title: stop.title,
@@ -213,7 +244,6 @@ export const GoogleMapView: React.FC<GoogleMapViewProps> = ({
     });
   }, [allPins, selectedDay, showGems]);
 
-  // Sync external focus
   useEffect(() => {
     if (!focusedPinId) return;
     const match = allPins.find((p) => p.id === focusedPinId);
@@ -228,7 +258,9 @@ export const GoogleMapView: React.FC<GoogleMapViewProps> = ({
       .map((p) => ({ lat: p.lat, lng: p.lon }));
   }, [visiblePins]);
 
-  const defaultCenter = useMemo(() => {
+  const activeCenter = useMemo(() => {
+    if (selectedPin) return { lat: selectedPin.lat, lng: selectedPin.lon };
+    if (userLocation) return { lat: userLocation.lat, lng: userLocation.lon };
     if (typeof centerLat === 'number' && typeof centerLon === 'number') {
       return { lat: centerLat, lng: centerLon };
     }
@@ -236,7 +268,16 @@ export const GoogleMapView: React.FC<GoogleMapViewProps> = ({
       return { lat: visiblePins[0].lat, lng: visiblePins[0].lon };
     }
     return { lat: 38.7223, lng: -9.1393 };
-  }, [centerLat, centerLon, visiblePins]);
+  }, [selectedPin, userLocation, centerLat, centerLon, visiblePins]);
+
+  const osmEmbedUrl = useMemo(() => {
+    const delta = visiblePins.length > 0 || destination ? 0.045 : 14;
+    const minLon = (activeCenter.lng - delta).toFixed(5);
+    const minLat = (activeCenter.lat - delta * 0.7).toFixed(5);
+    const maxLon = (activeCenter.lng + delta).toFixed(5);
+    const maxLat = (activeCenter.lat + delta * 0.7).toFixed(5);
+    return `https://www.openstreetmap.org/export/embed.html?bbox=${minLon}%2C${minLat}%2C${maxLon}%2C${maxLat}&layer=mapnik&marker=${activeCenter.lat.toFixed(5)}%2C${activeCenter.lng.toFixed(5)}`;
+  }, [activeCenter, visiblePins.length, destination]);
 
   const getPinStyle = (pin: MapPinPoint) => {
     if (pin.kind === 'gem') return { bg: '#F59E0B', border: '#78350F', glyph: '#0B1120' };
@@ -254,15 +295,7 @@ export const GoogleMapView: React.FC<GoogleMapViewProps> = ({
     }
   };
 
-  if (!activeApiKey) {
-    return (
-      <div className="w-full h-64 rounded-lg bg-[#131C2E] border border-[#24324A] flex flex-col items-center justify-center text-center px-6">
-        <Compass className="w-6 h-6 text-slate-500 mb-2" />
-        <p className="text-sm font-medium text-slate-300">Loading interactive route map</p>
-        <p className="text-xs text-slate-500 mt-1">Waiting for Google Maps configuration...</p>
-      </div>
-    );
-  }
+  const useGoogleMaps = Boolean(activeApiKey) && !googleAuthFailed;
 
   return (
     <div className="w-full rounded-lg bg-[#131C2E] border border-[#24324A] overflow-hidden flex flex-col">
@@ -271,7 +304,7 @@ export const GoogleMapView: React.FC<GoogleMapViewProps> = ({
         <div className="flex items-center gap-2 min-w-0">
           <MapPin className="w-4 h-4 text-cyan-400 shrink-0" />
           <span className="text-xs font-semibold text-slate-100 truncate">
-            {destination ? `${destination} Route Map` : 'Global Trip Map'}
+            {destination ? `${destination} Route Map` : 'Global Interactive Route Map'}
           </span>
           <span className="text-xs text-slate-500 font-mono tabular-nums">
             · {visiblePins.length} {visiblePins.length === 1 ? 'pin' : 'pins'}
@@ -323,126 +356,176 @@ export const GoogleMapView: React.FC<GoogleMapViewProps> = ({
             </button>
           )}
 
-          <button
-            type="button"
-            onClick={() => setFitTrigger((v) => v + 1)}
-            className="px-2.5 py-1 rounded-md text-xs border border-[#24324A] bg-[#131C2E] text-slate-300 hover:text-white hover:border-slate-500 transition flex items-center gap-1 cursor-pointer"
-            title="Recenter map to fit all stops"
-          >
-            <RotateCcw className="w-3 h-3 text-cyan-400" />
-            <span>Fit</span>
-          </button>
-
-          {destination && (
-            <a
-              href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([destination, country].filter(Boolean).join(', '))}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="px-2.5 py-1 rounded-md text-xs border border-[#24324A] bg-[#131C2E] text-slate-300 hover:text-cyan-300 transition flex items-center gap-1"
+          {useGoogleMaps && (
+            <button
+              type="button"
+              onClick={() => setFitTrigger((v) => v + 1)}
+              className="px-2.5 py-1 rounded-md text-xs border border-[#24324A] bg-[#131C2E] text-slate-300 hover:text-white hover:border-slate-500 transition flex items-center gap-1 cursor-pointer"
+              title="Recenter map to fit all stops"
             >
-              <span>Open Maps</span>
-              <ExternalLink className="w-3 h-3" />
-            </a>
+              <RotateCcw className="w-3 h-3 text-cyan-400" />
+              <span>Fit</span>
+            </button>
           )}
+
+          <a
+            href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+              selectedPin
+                ? `${selectedPin.title} ${destination}`
+                : [destination, country].filter(Boolean).join(', ') || `${activeCenter.lat},${activeCenter.lng}`
+            )}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="px-2.5 py-1 rounded-md text-xs border border-[#24324A] bg-[#131C2E] text-slate-300 hover:text-cyan-300 transition flex items-center gap-1"
+          >
+            <span>Open Maps</span>
+            <ExternalLink className="w-3 h-3" />
+          </a>
         </div>
       </div>
 
       {/* Map Viewport */}
       <div className={`relative w-full ${compact ? 'h-64' : 'h-80'} bg-[#0B1120]`}>
-        <APIProvider apiKey={activeApiKey} solutionChannel="gmp_mcp_codeassist_v1_aistudio">
-          <Map
-            id="tripbuddy-cockpit-map"
-            mapId="DEMO_MAP_ID"
-            internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
-            defaultCenter={defaultCenter}
-            defaultZoom={12}
-            gestureHandling="greedy"
-            fullscreenControl={true}
-            streetViewControl={false}
-            mapTypeControl={false}
-            className="w-full h-full"
+        {!keyChecked ? (
+          <div className="w-full h-full flex items-center justify-center gap-2 text-xs text-slate-400">
+            <Loader2 className="w-4 h-4 animate-spin text-cyan-400" />
+            <span>Initializing route map...</span>
+          </div>
+        ) : useGoogleMaps ? (
+          <APIProvider
+            key={activeApiKey}
+            apiKey={activeApiKey}
+            solutionChannel="gmp_mcp_codeassist_v1_aistudio"
           >
-            <CameraController
-              pins={visiblePins}
-              selectedPin={selectedPin}
-              triggerFit={fitTrigger}
-            />
+            <Map
+              id="tripbuddy-cockpit-map"
+              mapId="DEMO_MAP_ID"
+              internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
+              defaultCenter={activeCenter}
+              defaultZoom={destination ? 12 : 3}
+              gestureHandling="greedy"
+              fullscreenControl={true}
+              streetViewControl={false}
+              mapTypeControl={false}
+              className="w-full h-full"
+            >
+              <CameraController
+                pins={visiblePins}
+                selectedPin={selectedPin}
+                triggerFit={fitTrigger}
+              />
 
-            {routeCoords.length >= 2 && <RoutePolyline coordinates={routeCoords} />}
+              {routeCoords.length >= 2 && <RoutePolyline coordinates={routeCoords} />}
 
-            {userLocation && (
-              <AdvancedMarker
-                position={{ lat: userLocation.lat, lng: userLocation.lon }}
-                title={`Your Location: ${userLocation.label}`}
-                zIndex={120}
-              >
-                <Pin background="#38BDF8" borderColor="#0C4A6E" glyphColor="#0B1120" scale={1.15} />
-              </AdvancedMarker>
-            )}
-
-            {visiblePins.map((pin) => {
-              const style = getPinStyle(pin);
-              const isSelected = selectedPin?.id === pin.id;
-              return (
+              {userLocation && (
                 <AdvancedMarker
-                  key={pin.id}
-                  position={{ lat: pin.lat, lng: pin.lon }}
-                  onClick={() => {
-                    setSelectedPin(pin);
-                    onSelectPin?.(pin.id);
-                  }}
-                  title={pin.title}
-                  zIndex={isSelected ? 100 : pin.kind === 'gem' ? 40 : 20}
+                  position={{ lat: userLocation.lat, lng: userLocation.lon }}
+                  title={`Your Location: ${userLocation.label}`}
+                  zIndex={120}
                 >
-                  <Pin
-                    background={style.bg}
-                    borderColor={style.border}
-                    glyphColor={style.glyph}
-                    scale={isSelected ? 1.3 : 1.0}
-                  />
+                  <Pin background="#38BDF8" borderColor="#0C4A6E" glyphColor="#0B1120" scale={1.15} />
                 </AdvancedMarker>
-              );
-            })}
+              )}
 
-            {selectedPin && (
-              <InfoWindow
-                position={{ lat: selectedPin.lat, lng: selectedPin.lon }}
-                onCloseClick={() => {
-                  setSelectedPin(null);
-                  onSelectPin?.(null);
-                }}
-                headerContent={
-                  <div className="font-semibold text-xs text-slate-900">
-                    {selectedPin.title}
-                  </div>
-                }
-              >
-                <div className="text-slate-800 text-xs max-w-[230px] space-y-1.5 font-sans">
-                  <div className="text-[11px] text-slate-500">
-                    {[
-                      selectedPin.day ? `Day ${selectedPin.day}` : selectedPin.kind === 'gem' ? 'Local Gem' : 'Nearby',
-                      selectedPin.neighborhood,
-                      selectedPin.estimatedCost ? formatMoney(selectedPin.estimatedCost, currency, currencySymbol) : null,
-                    ]
-                      .filter(Boolean)
-                      .join(' · ')}
-                  </div>
-                  <p className="text-slate-700 leading-snug">{selectedPin.description}</p>
-                  <a
-                    href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${selectedPin.title} ${destination}`)}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 text-cyan-700 hover:text-cyan-900 font-semibold text-[11px] pt-1"
+              {visiblePins.map((pin) => {
+                const style = getPinStyle(pin);
+                const isSelected = selectedPin?.id === pin.id;
+                return (
+                  <AdvancedMarker
+                    key={pin.id}
+                    position={{ lat: pin.lat, lng: pin.lon }}
+                    onClick={() => {
+                      setSelectedPin(pin);
+                      onSelectPin?.(pin.id);
+                    }}
+                    title={pin.title}
+                    zIndex={isSelected ? 100 : pin.kind === 'gem' ? 40 : 20}
                   >
-                    <span>Directions in Google Maps</span>
-                    <ExternalLink className="w-3 h-3" />
-                  </a>
-                </div>
-              </InfoWindow>
-            )}
-          </Map>
-        </APIProvider>
+                    <Pin
+                      background={style.bg}
+                      borderColor={style.border}
+                      glyphColor={style.glyph}
+                      scale={isSelected ? 1.3 : 1.0}
+                    />
+                  </AdvancedMarker>
+                );
+              })}
+
+              {selectedPin && (
+                <InfoWindow
+                  position={{ lat: selectedPin.lat, lng: selectedPin.lon }}
+                  onCloseClick={() => {
+                    setSelectedPin(null);
+                    onSelectPin?.(null);
+                  }}
+                  headerContent={
+                    <div className="font-semibold text-xs text-slate-900">
+                      {selectedPin.title}
+                    </div>
+                  }
+                >
+                  <div className="text-slate-800 text-xs max-w-[230px] space-y-1.5 font-sans">
+                    <div className="text-[11px] text-slate-500">
+                      {[
+                        selectedPin.day ? `Day ${selectedPin.day}` : selectedPin.kind === 'gem' ? 'Local Gem' : 'Nearby',
+                        selectedPin.neighborhood,
+                        selectedPin.estimatedCost ? formatMoney(selectedPin.estimatedCost, currency, currencySymbol) : null,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </div>
+                    <p className="text-slate-700 leading-snug">{selectedPin.description}</p>
+                    <a
+                      href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${selectedPin.title} ${destination}`)}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-cyan-700 hover:text-cyan-900 font-semibold text-[11px] pt-1"
+                    >
+                      <span>Directions in Google Maps</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                  </div>
+                </InfoWindow>
+              )}
+            </Map>
+          </APIProvider>
+        ) : (
+          <iframe
+            title="Interactive Route Map"
+            src={osmEmbedUrl}
+            className="w-full h-full border-0"
+            loading="lazy"
+            referrerPolicy="no-referrer-when-downgrade"
+          />
+        )}
       </div>
+
+      {/* Interactive Pin Focus Bar */}
+      {visiblePins.length > 0 && (
+        <div className="px-3 py-2 bg-[#0F172A] border-t border-[#24324A] flex items-center gap-1.5 overflow-x-auto">
+          {visiblePins.slice(0, 12).map((pin) => {
+            const isSelected = selectedPin?.id === pin.id;
+            return (
+              <button
+                key={pin.id}
+                type="button"
+                onClick={() => {
+                  setSelectedPin(pin);
+                  onSelectPin?.(pin.id);
+                }}
+                className={`px-2.5 py-1 rounded border text-[11px] whitespace-nowrap transition cursor-pointer ${
+                  isSelected
+                    ? 'border-cyan-500/60 bg-cyan-500/15 text-cyan-200 font-medium'
+                    : 'border-[#24324A] bg-[#131C2E] text-slate-300 hover:text-white'
+                }`}
+              >
+                {pin.day ? `D${pin.day} · ` : pin.kind === 'gem' ? 'Gem · ' : ''}
+                {pin.title}
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 };

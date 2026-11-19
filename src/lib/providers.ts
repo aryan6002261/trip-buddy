@@ -11,6 +11,10 @@ let cachedGeminiClient: GoogleGenAI | null = null;
 let geminiAuthState: 'unknown' | 'valid' | 'invalid' = 'unknown';
 const geocodeCache = new Map<string, { lat: number; lon: number; displayName?: string } | null>();
 
+function timeoutSignal(ms: number): AbortSignal {
+  return AbortSignal.timeout(ms);
+}
+
 export function getGeminiClient(): GoogleGenAI | null {
   const apiKey = (process.env.GEMINI_API_KEY || '').trim();
   if (!apiKey) return null;
@@ -23,6 +27,7 @@ export function getGeminiClient(): GoogleGenAI | null {
         headers: {
           'User-Agent': 'aistudio-build',
         },
+        timeout: 22000,
       },
     });
   }
@@ -49,11 +54,17 @@ async function checkGeminiKeyHealth(): Promise<boolean> {
   if (geminiAuthState === 'valid') return true;
   if (geminiAuthState === 'invalid') return false;
 
-  // Standard Gemini Developer API keys begin with "AIza". Non-AIza tokens (e.g. AQ.)
-  // are verified once so we don't repeatedly fail with 401 on every user chat turn.
+  // Standard Gemini Developer API keys begin with "AIza".
   if (apiKey.startsWith('AIza')) {
     geminiAuthState = 'valid';
     return true;
+  }
+
+  // If OpenRouter is available and GEMINI_API_KEY is a non-AIza token (e.g. AQ.),
+  // avoid burning cold-start seconds on a guaranteed 401 probe on Vercel.
+  if (apiKey.startsWith('AQ.') && (process.env.OPENROUTER_API_KEY || '').trim()) {
+    geminiAuthState = 'invalid';
+    return false;
   }
 
   try {
@@ -74,7 +85,6 @@ async function checkGeminiKeyHealth(): Promise<boolean> {
       geminiAuthState = 'invalid';
       return false;
     }
-    // Transient or model error — keep available
     geminiAuthState = 'valid';
     return true;
   }
@@ -103,31 +113,32 @@ export async function getAvailableModels(): Promise<AIModelDefinition[]> {
       ]
     : [];
 
+  // Fast, low-latency OpenRouter models first to guarantee <6s responses on Vercel
   const openRouterModels: AIModelDefinition[] = hasOpenRouterKey
     ? [
         {
-          id: 'openrouter/auto',
-          label: 'OpenRouter Auto',
+          id: 'openrouter/openai/gpt-4o-mini',
+          label: 'OpenRouter · GPT-4o Mini (Fast)',
           provider: 'openrouter',
-          note: 'Automatic best-fit router',
+          note: 'Ultra-fast (~2s) reliable planning',
         },
         {
           id: 'openrouter/google/gemini-2.5-flash',
           label: 'OpenRouter · Gemini 2.5 Flash',
           provider: 'openrouter',
-          note: 'Fast travel reasoning via OpenRouter',
-        },
-        {
-          id: 'openrouter/openai/gpt-4o-mini',
-          label: 'OpenRouter · GPT-4o Mini',
-          provider: 'openrouter',
-          note: 'Reliable structured planning',
+          note: 'Fast global travel reasoning',
         },
         {
           id: 'openrouter/deepseek/deepseek-chat',
           label: 'OpenRouter · DeepSeek Chat',
           provider: 'openrouter',
-          note: 'Strong multi-step reasoning',
+          note: 'Strong multi-step itinerary reasoning',
+        },
+        {
+          id: 'openrouter/auto',
+          label: 'OpenRouter Auto',
+          provider: 'openrouter',
+          note: 'Automatic router',
         },
       ]
     : [];
@@ -135,7 +146,6 @@ export async function getAvailableModels(): Promise<AIModelDefinition[]> {
   if (geminiHealthy) {
     models.push(...geminiModels, ...openRouterModels);
   } else if (hasOpenRouterKey) {
-    // Prioritize verified working OpenRouter models first when Gemini key is unauthenticated
     models.push(...openRouterModels, ...geminiModels);
   } else {
     models.push(...geminiModels);
@@ -150,6 +160,7 @@ export interface AICallOptions {
   messages: { role: 'user' | 'assistant'; content: string }[];
   useSearchGrounding?: boolean;
   expectJson?: boolean;
+  maxTokens?: number;
 }
 
 export interface AICallResult {
@@ -221,11 +232,12 @@ async function callOpenRouterModel(
     throw new Error('OPENROUTER_API_KEY is not configured on the server.');
   }
 
-  const cleanModel = requestedModel.replace(/^openrouter\//, '') || 'openrouter/auto';
+  const cleanModel = requestedModel.replace(/^openrouter\//, '') || 'openai/gpt-4o-mini';
   const modelId = cleanModel === 'auto' ? 'openrouter/auto' : cleanModel;
 
   const payload: Record<string, any> = {
     model: modelId,
+    max_tokens: options.maxTokens ?? 2600,
     messages: [
       { role: 'system', content: options.systemInstruction },
       ...options.messages.map((m) => ({
@@ -248,6 +260,7 @@ async function callOpenRouterModel(
       'X-Title': 'TripBuddy AI Travel Companion',
     },
     body: JSON.stringify(payload),
+    signal: timeoutSignal(20000),
   });
 
   if (!response.ok) {
@@ -270,9 +283,12 @@ function formatReadableProviderError(err: Error | null): Error {
   if (!err) {
     return new Error('Unable to reach the configured AI providers. Please try again.');
   }
+  if (err.name === 'TimeoutError' || err.message.toLowerCase().includes('timeout')) {
+    return new Error('The AI provider timed out. Try switching to GPT-4o Mini (Fast) and retry.');
+  }
   if (isAuthError(err)) {
     return new Error(
-      'The configured GEMINI_API_KEY was rejected by Google (401 Unauthenticated). Update your Gemini API key in Settings > Secrets or select an OpenRouter model.'
+      'The configured GEMINI_API_KEY was rejected by Google (401 Unauthenticated). Update your Gemini API key in Settings or select an OpenRouter model.'
     );
   }
   return err;
@@ -287,20 +303,25 @@ export async function callAI(options: AICallOptions): Promise<AICallResult> {
   }
 
   const geminiUsable = hasGeminiKey ? await checkGeminiKeyHealth() : false;
+  const defaultOpenRouter = 'openrouter/openai/gpt-4o-mini';
   const requested =
-    options.model || (geminiUsable ? 'gemini-4-hydrogen' : hasOpenRouterKey ? 'openrouter/auto' : 'gemini-4-hydrogen');
+    options.model || (geminiUsable ? 'gemini-4-hydrogen' : hasOpenRouterKey ? defaultOpenRouter : 'gemini-4-hydrogen');
 
   const attempts: Array<{ provider: 'gemini' | 'openrouter'; run: () => Promise<AICallResult> }> = [];
 
   if (requested.startsWith('openrouter/')) {
     if (hasOpenRouterKey) {
-      attempts.push({ provider: 'openrouter', run: () => callOpenRouterModel(requested, options) });
-      if (requested !== 'openrouter/auto') {
-        attempts.push({ provider: 'openrouter', run: () => callOpenRouterModel('openrouter/auto', options) });
+      // Avoid routing slow openrouter/auto first when user didn't explicitly pick a slow model
+      const primaryModel = requested === 'openrouter/auto' ? 'openrouter/openai/gpt-4o-mini' : requested;
+      attempts.push({ provider: 'openrouter', run: () => callOpenRouterModel(primaryModel, options) });
+      if (primaryModel !== 'openrouter/openai/gpt-4o-mini') {
+        attempts.push({ provider: 'openrouter', run: () => callOpenRouterModel('openrouter/openai/gpt-4o-mini', options) });
+      }
+      if (primaryModel !== 'openrouter/google/gemini-2.5-flash') {
+        attempts.push({ provider: 'openrouter', run: () => callOpenRouterModel('openrouter/google/gemini-2.5-flash', options) });
       }
     }
     if (geminiUsable) {
-      attempts.push({ provider: 'gemini', run: () => callGeminiModel('gemini-4-hydrogen', { ...options, useSearchGrounding: false }) });
       attempts.push({ provider: 'gemini', run: () => callGeminiModel('gemini-3.1-flash-lite', { ...options, useSearchGrounding: false }) });
     }
   } else {
@@ -313,9 +334,9 @@ export async function callAI(options: AICallOptions): Promise<AICallResult> {
       attempts.push({ provider: 'gemini', run: () => callGeminiModel(altGemini, { ...options, useSearchGrounding: false }) });
     }
     if (hasOpenRouterKey) {
-      attempts.push({ provider: 'openrouter', run: () => callOpenRouterModel('openrouter/auto', options) });
+      attempts.push({ provider: 'openrouter', run: () => callOpenRouterModel('openrouter/openai/gpt-4o-mini', options) });
+      attempts.push({ provider: 'openrouter', run: () => callOpenRouterModel('openrouter/google/gemini-2.5-flash', options) });
     } else if (hasGeminiKey && !geminiUsable) {
-      // Only try Gemini directly if no other provider exists, so the user sees the clear auth error
       attempts.push({ provider: 'gemini', run: () => callGeminiModel(requested, { ...options, useSearchGrounding: false }) });
     }
   }
@@ -348,14 +369,12 @@ export function extractJsonObject<T = any>(rawText: string): T | null {
   if (!rawText) return null;
   const trimmed = rawText.trim();
 
-  // Direct parse
   try {
     return JSON.parse(trimmed) as T;
   } catch {
     // continue
   }
 
-  // Fenced JSON block
   const fencedMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fencedMatch && fencedMatch[1]) {
     try {
@@ -365,7 +384,6 @@ export function extractJsonObject<T = any>(rawText: string): T | null {
     }
   }
 
-  // First { to last }
   const firstBrace = trimmed.indexOf('{');
   const lastBrace = trimmed.lastIndexOf('}');
   if (firstBrace !== -1 && lastBrace > firstBrace) {
@@ -379,42 +397,67 @@ export function extractJsonObject<T = any>(rawText: string): T | null {
   return null;
 }
 
+export interface TavilyArticle {
+  title: string;
+  url: string;
+  content: string;
+  publishedDate?: string;
+  sourceName: string;
+}
+
 export interface TavilySearchOutput {
   contextText: string;
   sources: GroundingSource[];
+  articles: TavilyArticle[];
+}
+
+function extractDomainName(uri: string): string {
+  try {
+    const host = new URL(uri).hostname.replace(/^www\./, '');
+    return host;
+  } catch {
+    return 'Trusted Source';
+  }
 }
 
 export async function tavilySearch(
   query: string,
-  maxResults = 5,
-  topic: 'general' | 'news' = 'general'
+  maxResults = 4,
+  topic: 'general' | 'news' = 'general',
+  days?: number
 ): Promise<TavilySearchOutput> {
-  const apiKey = process.env.TAVILY_API_KEY;
+  const apiKey = (process.env.TAVILY_API_KEY || '').trim();
   if (!apiKey || !query.trim()) {
-    return { contextText: '', sources: [] };
+    return { contextText: '', sources: [], articles: [] };
   }
 
   try {
+    const body: Record<string, any> = {
+      api_key: apiKey,
+      query: query.trim(),
+      search_depth: 'basic',
+      topic,
+      max_results: maxResults,
+      include_answer: true,
+    };
+    if (topic === 'news' && days) {
+      body.days = days;
+    }
+
     const response = await fetch('https://api.tavily.com/search', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        api_key: apiKey,
-        query: query.trim(),
-        search_depth: 'basic',
-        topic,
-        max_results: maxResults,
-        include_answer: true,
-      }),
+      body: JSON.stringify(body),
+      signal: timeoutSignal(5500),
     });
 
     if (!response.ok) {
-      console.warn(`Tavily search returned ${response.status} for query: ${query}`);
-      return { contextText: '', sources: [] };
+      return { contextText: '', sources: [], articles: [] };
     }
 
     const data: any = await response.json();
     const sources: GroundingSource[] = [];
+    const articles: TavilyArticle[] = [];
     const lines: string[] = [];
 
     if (data.answer) {
@@ -424,14 +467,24 @@ export async function tavilySearch(
     if (Array.isArray(data.results)) {
       for (const item of data.results) {
         if (item.url) {
+          const sourceName = extractDomainName(item.url);
           sources.push({
-            title: item.title || item.url,
+            title: item.title || sourceName,
             uri: item.url,
             provider: 'tavily',
           });
+          articles.push({
+            title: item.title || sourceName,
+            url: item.url,
+            content: (item.content || '').slice(0, 340),
+            publishedDate: item.published_date || undefined,
+            sourceName,
+          });
         }
         if (item.title || item.content) {
-          lines.push(`- ${item.title || 'Source'}: ${(item.content || '').slice(0, 320)}`);
+          lines.push(
+            `- [${extractDomainName(item.url || '')}] ${item.title || 'Update'}${item.published_date ? ` (${item.published_date})` : ''}: ${(item.content || '').slice(0, 280)}`
+          );
         }
       }
     }
@@ -439,11 +492,45 @@ export async function tavilySearch(
     return {
       contextText: lines.join('\n'),
       sources,
+      articles,
     };
-  } catch (err: any) {
-    console.warn('Tavily search failed:', err?.message || err);
-    return { contextText: '', sources: [] };
+  } catch {
+    return { contextText: '', sources: [], articles: [] };
   }
+}
+
+export async function tavilyAreaNewsSearch(location: string): Promise<TavilySearchOutput> {
+  if (!location.trim()) {
+    return { contextText: '', sources: [], articles: [] };
+  }
+
+  const [breakingNews, eventsAdvisories] = await Promise.all([
+    tavilySearch(
+      `${location} latest news today transit strike weather alert closure travel advisory`,
+      5,
+      'news',
+      7
+    ),
+    tavilySearch(
+      `${location} local events festivals exhibitions closures travel updates this week`,
+      4,
+      'general'
+    ),
+  ]);
+
+  const seenUrls = new Set<string>();
+  const articles: TavilyArticle[] = [];
+  for (const a of [...breakingNews.articles, ...eventsAdvisories.articles]) {
+    if (!a.url || seenUrls.has(a.url)) continue;
+    seenUrls.add(a.url);
+    articles.push(a);
+  }
+
+  return {
+    contextText: [breakingNews.contextText, eventsAdvisories.contextText].filter(Boolean).join('\n'),
+    sources: dedupeSources([...breakingNews.sources, ...eventsAdvisories.sources]),
+    articles: articles.slice(0, 8),
+  };
 }
 
 export async function geocodePlace(
@@ -453,21 +540,22 @@ export async function geocodePlace(
   const cleanQuery = query.trim();
   if (!cleanQuery) return null;
 
-  const fullQuery = nearContext && !cleanQuery.toLowerCase().includes(nearContext.toLowerCase())
-    ? `${cleanQuery}, ${nearContext}`
-    : cleanQuery;
+  const fullQuery =
+    nearContext && !cleanQuery.toLowerCase().includes(nearContext.toLowerCase())
+      ? `${cleanQuery}, ${nearContext}`
+      : cleanQuery;
 
   const cacheKey = fullQuery.toLowerCase();
   if (geocodeCache.has(cacheKey)) {
     return geocodeCache.get(cacheKey) || null;
   }
 
-  // 1. Try Google Maps Geocoding API if key is available
-  const googleKey = process.env.GOOGLE_MAPS_API_KEY || process.env.VITE_GOOGLE_MAPS_API_KEY;
+  // 1. Try Google Maps Geocoding API (fast, ~150ms)
+  const googleKey = (process.env.GOOGLE_MAPS_API_KEY || process.env.VITE_GOOGLE_MAPS_API_KEY || '').trim();
   if (googleKey) {
     try {
       const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(fullQuery)}&key=${encodeURIComponent(googleKey)}`;
-      const res = await fetch(url);
+      const res = await fetch(url, { signal: timeoutSignal(2200) });
       if (res.ok) {
         const data: any = await res.json();
         const first = data?.results?.[0];
@@ -482,15 +570,16 @@ export async function geocodePlace(
         }
       }
     } catch {
-      // fall through to Nominatim
+      // fall through
     }
   }
 
-  // 2. Fallback to OpenStreetMap Nominatim (free, global)
+  // 2. Fallback to OpenStreetMap Nominatim with tight 2s timeout
   try {
     const nomUrl = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(fullQuery)}`;
     const res = await fetch(nomUrl, {
       headers: { 'User-Agent': 'TripBuddyTravelCompanion/2.0' },
+      signal: timeoutSignal(2200),
     });
     if (res.ok) {
       const arr: any[] = await res.json();
@@ -505,7 +594,7 @@ export async function geocodePlace(
       }
     }
   } catch {
-    // ignore
+    // ignore timeout
   }
 
   geocodeCache.set(cacheKey, null);
@@ -534,7 +623,7 @@ export async function fetchOpenMeteoWeather(
 ): Promise<WeatherSnapshot> {
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,weather_code,wind_speed_10m,precipitation&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto&forecast_days=7`;
 
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: timeoutSignal(4500) });
   if (!res.ok) {
     throw new Error(`Open-Meteo weather request failed (${res.status})`);
   }
