@@ -10,7 +10,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@google/genai": "^2.27.0",
+    "@google/genai": "^3.6.1",
     "@vis.gl/react-google-maps": "^1.10.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",

@@ -3,7 +3,18 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import { executePlanPipeline } from './src/lib/planner';
+import { getAvailableModels } from './src/lib/providers';
+import {
+  runConversationalTurn,
+  runCostRealityCheck,
+  runGroupSynthesis,
+  runLiveSuggestions,
+  runLocalGemsDiscovery,
+  runPlanBGenerator,
+  runSurpriseMe,
+  runWeatherAdaptation,
+  runWeatherFetch,
+} from './src/lib/agentEngine';
 
 dotenv.config();
 
@@ -12,106 +23,176 @@ const app = express();
 const port = parseInt(process.env.PORT || '3000', 10);
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 
-// ---------------------------------------------------------
-// Status Route
-// ---------------------------------------------------------
-const handleStatus = (_req: Request, res: Response) => {
-  const geminiOk = Boolean(process.env.GEMINI_API_KEY);
-  const openrouterOk = Boolean(process.env.OPENROUTER_API_KEY);
-  const tavilyOk = Boolean(process.env.TAVILY_API_KEY);
-  const mapsOk = Boolean(process.env.VITE_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY);
+const apiRouter = express.Router();
 
+apiRouter.get('/status', async (_req: Request, res: Response) => {
+  const models = await getAvailableModels();
   res.json({
-    ai_model: geminiOk || openrouterOk,
-    web_search: tavilyOk,
-    provider: geminiOk ? 'Google Gemini 3.5 Flash Lite' : (openrouterOk ? 'OpenRouter' : 'Local Fallback'),
-    services: {
-      gemini: geminiOk,
-      openrouter: openrouterOk,
-      tavily: tavilyOk,
-      maps: mapsOk,
-    },
+    gemini: Boolean((process.env.GEMINI_API_KEY || '').trim()),
+    openrouter: Boolean((process.env.OPENROUTER_API_KEY || '').trim()),
+    tavily: Boolean((process.env.TAVILY_API_KEY || '').trim()),
+    maps: Boolean(process.env.VITE_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY),
+    availableModels: models,
   });
-};
+});
 
-const handleMapsKey = (_req: Request, res: Response) => {
+apiRouter.get('/maps-key', (_req: Request, res: Response) => {
   const key = process.env.VITE_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY || '';
   res.json({ key });
-};
+});
 
-// ---------------------------------------------------------
-// Plan Streaming Route (SSE)
-// ---------------------------------------------------------
-const handlePlanStream = async (req: Request, res: Response) => {
-  const { user_request } = req.body || {};
-
-  if (!user_request || typeof user_request !== 'string' || !user_request.trim()) {
-    res.status(400).json({ error: 'user_request is required' });
-    return;
-  }
-
-  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no');
-  res.flushHeaders?.();
-
-  const sendEvent = (event: string, data: any) => {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-  };
-
+apiRouter.post('/chat', async (req: Request, res: Response) => {
   try {
-    await executePlanPipeline(user_request, sendEvent);
-    res.write('event: done\ndata: {}\n\n');
-    res.end();
-  } catch (err: any) {
-    console.error('Plan stream error:', err);
-    sendEvent('error', {
-      message: err.message || 'Something went wrong while planning your trip.',
+    const { trip, userMessage, model } = req.body || {};
+    if (!userMessage || typeof userMessage !== 'string' || !userMessage.trim()) {
+      res.status(400).json({ error: 'userMessage is required.' });
+      return;
+    }
+    const result = await runConversationalTurn({
+      trip: trip || {},
+      userMessage: userMessage.trim(),
+      model,
     });
-    res.end();
-  }
-};
-
-// ---------------------------------------------------------
-// Plan JSON Route (Direct fallback)
-// ---------------------------------------------------------
-const handlePlanJSON = async (req: Request, res: Response) => {
-  const { user_request } = req.body || {};
-
-  if (!user_request || typeof user_request !== 'string' || !user_request.trim()) {
-    res.status(400).json({ error: 'user_request is required' });
-    return;
-  }
-
-  try {
-    const result = await executePlanPipeline(user_request);
     res.json(result);
   } catch (err: any) {
-    console.error('Plan JSON error:', err);
-    res.status(500).json({
-      error: err.message || 'Something went wrong while planning your trip.',
-    });
+    console.error('[/api/chat] error:', err);
+    res.status(500).json({ error: err?.message || 'Conversational AI request failed.' });
   }
-};
+});
 
-// ---------------------------------------------------------
-// Mount Routes on both '/api' and '/'
-// ---------------------------------------------------------
-const apiRouter = express.Router();
-apiRouter.get('/status', handleStatus);
-apiRouter.get('/maps-key', handleMapsKey);
-apiRouter.post('/plan/stream', handlePlanStream);
-apiRouter.post('/plan', handlePlanJSON);
+apiRouter.post('/weather', async (req: Request, res: Response) => {
+  try {
+    const { destination, country, lat, lon } = req.body || {};
+    const snapshot = await runWeatherFetch({ destination, country, lat, lon });
+    res.json(snapshot);
+  } catch (err: any) {
+    console.error('[/api/weather] error:', err);
+    res.status(500).json({ error: err?.message || 'Unable to fetch live weather.' });
+  }
+});
+
+apiRouter.post('/weather/adapt', async (req: Request, res: Response) => {
+  try {
+    const { trip, model } = req.body || {};
+    if (!trip) {
+      res.status(400).json({ error: 'trip state is required.' });
+      return;
+    }
+    const result = await runWeatherAdaptation({ trip, model });
+    res.json(result);
+  } catch (err: any) {
+    console.error('[/api/weather/adapt] error:', err);
+    res.status(500).json({ error: err?.message || 'Weather adaptation failed.' });
+  }
+});
+
+apiRouter.post('/plan-b', async (req: Request, res: Response) => {
+  try {
+    const { trip, cancelledStop, reason, model } = req.body || {};
+    const result = await runPlanBGenerator({
+      trip: trip || {},
+      cancelledStop,
+      reason: reason || 'Venue is closed, crowded, or disrupted',
+      model,
+    });
+    res.json(result);
+  } catch (err: any) {
+    console.error('[/api/plan-b] error:', err);
+    res.status(500).json({ error: err?.message || 'Plan B generation failed.' });
+  }
+});
+
+apiRouter.post('/live/suggest', async (req: Request, res: Response) => {
+  try {
+    const { trip, locationLabel, lat, lon, remainingHours, mood, model } = req.body || {};
+    const result = await runLiveSuggestions({
+      trip: trip || {},
+      locationLabel: locationLabel || '',
+      lat: typeof lat === 'number' ? lat : undefined,
+      lon: typeof lon === 'number' ? lon : undefined,
+      remainingHours: Number(remainingHours) || 3,
+      mood,
+      model,
+    });
+    res.json(result);
+  } catch (err: any) {
+    console.error('[/api/live/suggest] error:', err);
+    res.status(500).json({ error: err?.message || 'Live companion suggestions failed.' });
+  }
+});
+
+apiRouter.post('/budget/reality-check', async (req: Request, res: Response) => {
+  try {
+    const { trip, overrideBudget, overrideCurrency, model } = req.body || {};
+    const result = await runCostRealityCheck({
+      trip: trip || {},
+      overrideBudget: overrideBudget !== undefined ? Number(overrideBudget) : undefined,
+      overrideCurrency,
+      model,
+    });
+    res.json(result);
+  } catch (err: any) {
+    console.error('[/api/budget/reality-check] error:', err);
+    res.status(500).json({ error: err?.message || 'Cost reality check failed.' });
+  }
+});
+
+apiRouter.post('/group/synthesize', async (req: Request, res: Response) => {
+  try {
+    const { trip, members, model } = req.body || {};
+    const result = await runGroupSynthesis({
+      trip: trip || {},
+      members: members || [],
+      model,
+    });
+    res.json(result);
+  } catch (err: any) {
+    console.error('[/api/group/synthesize] error:', err);
+    res.status(500).json({ error: err?.message || 'Group consensus synthesis failed.' });
+  }
+});
+
+apiRouter.post('/discover/surprise', async (req: Request, res: Response) => {
+  try {
+    const { origin, budget, currency, durationDays, personality, vibe, model } = req.body || {};
+    const result = await runSurpriseMe({
+      origin: origin || '',
+      budget: Number(budget) || 1500,
+      currency: currency || 'USD',
+      durationDays: Number(durationDays) || 5,
+      personality: personality || 'Curious Explorer',
+      vibe: vibe || 'Culture, food & hidden neighborhoods',
+      model,
+    });
+    res.json(result);
+  } catch (err: any) {
+    console.error('[/api/discover/surprise] error:', err);
+    res.status(500).json({ error: err?.message || 'Surprise Me discovery failed.' });
+  }
+});
+
+apiRouter.post('/discover/gems', async (req: Request, res: Response) => {
+  try {
+    const { destination, country, focus, currency, model } = req.body || {};
+    const result = await runLocalGemsDiscovery({
+      destination: destination || '',
+      country,
+      focus,
+      currency,
+      model,
+    });
+    res.json(result);
+  } catch (err: any) {
+    console.error('[/api/discover/gems] error:', err);
+    res.status(500).json({ error: err?.message || 'Local gems discovery failed.' });
+  }
+});
 
 app.use('/api', apiRouter);
 app.use('/', apiRouter);
 
-// ---------------------------------------------------------
-// Vite Integration for Dev / Static Serving for Prod
-// ---------------------------------------------------------
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');

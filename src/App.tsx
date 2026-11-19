@@ -1,639 +1,1236 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Send, Plane, Compass, Sparkles, AlertCircle, RefreshCw, Mic, MicOff } from 'lucide-react';
-import { Sidebar } from './components/Sidebar';
-import { ProgressIndicator } from './components/ProgressIndicator';
-import { PlanCard } from './components/PlanCard';
-import { ChatMessage, AgentNode, ParsedTripDetails } from './types';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import {
+  Plus,
+  Printer,
+  Coffee,
+  Compass,
+  Navigation,
+  Wallet,
+  Users,
+  Sparkles,
+  Trash2,
+  Map as MapIcon,
+} from 'lucide-react';
+import {
+  AIModelDefinition,
+  AIProviderId,
+  ChatMessage,
+  ChatTurnResponse,
+  CockpitTab,
+  ExpenseEntry,
+  GroupMember,
+  HiddenGemItem,
+  ItineraryStop,
+  LiveSuggestion,
+  PaceEnergyProfile,
+  PlanBAlternative,
+  ServiceStatus,
+  SurprisePitch,
+  TripPatch,
+  TripWorkspace,
+  WorkspaceMode,
+} from './types';
+import {
+  createNewWorkspace,
+  formatMoney,
+  getCurrencySymbol,
+  loadActiveWorkspaceId,
+  loadSelectedModel,
+  loadWorkspaces,
+  saveActiveWorkspaceId,
+  saveSelectedModel,
+  saveWorkspaces,
+} from './lib/storage';
+import { ChatPane } from './components/ChatPane';
+import { ItineraryMapPanel } from './components/ItineraryMapPanel';
+import { LiveCompanionPanel } from './components/LiveCompanionPanel';
+import { BudgetRealityPanel } from './components/BudgetRealityPanel';
+import { GroupDecisionPanel } from './components/GroupDecisionPanel';
+import { DiscoverPanel } from './components/DiscoverPanel';
+import { PrintableTripView } from './components/PrintableTripView';
 
-const INITIAL_WELCOME_CONTENT = `### 👋 Let's plan a trip.
+function applyTripPatch(trip: TripWorkspace, patch?: TripPatch): TripWorkspace {
+  if (!patch) return trip;
+  const next: TripWorkspace = {
+    ...trip,
+    updatedAt: new Date().toISOString(),
+  };
 
-Try something like:
+  if (patch.title) next.title = patch.title;
+  if (patch.origin) next.origin = patch.origin;
+  if (patch.destination) {
+    next.destination = patch.destination;
+    if (!next.liveLocation.label || next.liveLocation.source === 'destination') {
+      next.liveLocation = {
+        ...next.liveLocation,
+        label: [patch.destination, patch.country || next.country].filter(Boolean).join(', '),
+        lat: patch.lat ?? next.lat,
+        lon: patch.lon ?? next.lon,
+        source: 'destination',
+      };
+    }
+    if (next.title === 'Untitled Global Trip') {
+      next.title = `${patch.destination}${patch.durationDays ? ` · ${patch.durationDays}d` : ''}`;
+    }
+  }
+  if (patch.country) next.country = patch.country;
+  if (typeof patch.lat === 'number') next.lat = patch.lat;
+  if (typeof patch.lon === 'number') next.lon = patch.lon;
+  if (typeof patch.durationDays === 'number' && patch.durationDays > 0) {
+    next.durationDays = patch.durationDays;
+  }
+  if (patch.startDate) next.startDate = patch.startDate;
+  if (patch.currency) {
+    next.currency = patch.currency.toUpperCase();
+    next.currencySymbol = patch.currencySymbol || getCurrencySymbol(patch.currency);
+  }
+  if (typeof patch.targetBudget === 'number' && patch.targetBudget > 0) {
+    next.targetBudget = patch.targetBudget;
+  }
+  if (typeof patch.travelersCount === 'number' && patch.travelersCount > 0) {
+    next.travelersCount = patch.travelersCount;
+  }
+  if (patch.paceProfile) {
+    next.paceProfile = { ...next.paceProfile, ...patch.paceProfile };
+  }
+  if (patch.budgetEstimate) {
+    next.budgetEstimate = {
+      ...next.budgetEstimate,
+      ...patch.budgetEstimate,
+    };
+  }
+  if (Array.isArray(patch.days) && patch.days.length > 0) {
+    next.days = patch.days;
+    if (!next.durationDays) next.durationDays = patch.days.length;
+  }
+  if (Array.isArray(patch.upsertCustomSections) && patch.upsertCustomSections.length > 0) {
+    const updated = [...next.customSections];
+    for (const incoming of patch.upsertCustomSections) {
+      const idx = updated.findIndex(
+        (s) => s.id === incoming.id || s.title.toLowerCase() === incoming.title.toLowerCase()
+      );
+      if (idx >= 0) {
+        updated[idx] = incoming;
+      } else {
+        updated.push(incoming);
+      }
+    }
+    next.customSections = updated;
+  }
+  if (Array.isArray(patch.removeCustomSectionTitles) && patch.removeCustomSectionTitles.length > 0) {
+    const lowerSet = new Set(patch.removeCustomSectionTitles.map((t) => t.toLowerCase()));
+    next.customSections = next.customSections.filter((s) => !lowerSet.has(s.title.toLowerCase()));
+  }
+  if (Array.isArray(patch.addHiddenGems) && patch.addHiddenGems.length > 0) {
+    const existingNames = new Set(next.hiddenGems.map((g) => g.title.toLowerCase()));
+    const fresh = patch.addHiddenGems.filter((g) => !existingNames.has(g.title.toLowerCase()));
+    next.hiddenGems = [...fresh, ...next.hiddenGems];
+  }
 
-> **I want to spend 5 days in Manali, starting from Delhi. My budget is ₹15,000. I love photography, nature and cafes. I prefer relaxed trips and absolutely hate waking up early.**
-
-You don't need to know exactly what you want.
-
-**Just tell me what kind of trip you want.**`;
+  return next;
+}
 
 export default function App() {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
-  const [currentModel, setCurrentModel] = useState('gemini-3.5-flash-lite');
-  const [serviceStatus, setServiceStatus] = useState({
-    ai_model: true,
-    web_search: false,
-    provider: 'Google Gemini 3.5 Flash Lite',
+  const [workspaces, setWorkspaces] = useState<TripWorkspace[]>(() => {
+    const loaded = loadWorkspaces();
+    return loaded.length > 0 ? loaded : [createNewWorkspace()];
   });
 
-  // Voice to text Web Speech API state
-  const [isListening, setIsListening] = useState(false);
-  const [speechError, setSpeechError] = useState<string | null>(null);
-  const recognitionRef = useRef<any>(null);
+  const [activeId, setActiveId] = useState<string>(() => {
+    const savedId = loadActiveWorkspaceId();
+    const loaded = loadWorkspaces();
+    if (savedId && loaded.some((w) => w.id === savedId)) return savedId;
+    return loaded[0]?.id || '';
+  });
 
-  // Active planning state
-  const [currentNode, setCurrentNode] = useState<AgentNode | null>(null);
-  const [completedNodes, setCompletedNodes] = useState<AgentNode[]>([]);
-  const [currentStatusText, setCurrentStatusText] = useState<string>('');
-  const [activeParsedDetails, setActiveParsedDetails] = useState<ParsedTripDetails | null>(null);
-  const [activeFlightInfo, setActiveFlightInfo] = useState<string>('');
-  const [activeHotelInfo, setActiveHotelInfo] = useState<string>('');
-  const [activeItineraryInfo, setActiveItineraryInfo] = useState<string>('');
+  const [activeTab, setActiveTab] = useState<CockpitTab>('itinerary');
+  const [mobilePane, setMobilePane] = useState<'chat' | 'cockpit'>('chat');
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [availableModels, setAvailableModels] = useState<AIModelDefinition[]>([
+    {
+      id: 'gemini-4-hydrogen',
+      label: 'Gemini 4 Hydrogen',
+      provider: 'gemini',
+      note: 'Deep conversational planner & Search grounding',
+    },
+  ]);
+  const [selectedModel, setSelectedModel] = useState<AIProviderId>(
+    () => (loadSelectedModel() as AIProviderId) || 'gemini-4-hydrogen'
+  );
 
-  // Check service status on mount
+  const [isChatLoading, setIsChatLoading] = useState(false);
+  const [isPanelBusy, setIsPanelBusy] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Plan B ephemeral UI state
+  const [planBTarget, setPlanBTarget] = useState<ItineraryStop | null>(null);
+  const [planBResults, setPlanBResults] = useState<PlanBAlternative[]>([]);
+  const [planBNote, setPlanBNote] = useState<string | null>(null);
+
+  // Keep activeId valid
+  useEffect(() => {
+    if (!workspaces.some((w) => w.id === activeId) && workspaces[0]) {
+      setActiveId(workspaces[0].id);
+    }
+  }, [workspaces, activeId]);
+
+  // Persist workspaces & activeId in localStorage
+  useEffect(() => {
+    saveWorkspaces(workspaces);
+  }, [workspaces]);
+
+  useEffect(() => {
+    if (activeId) saveActiveWorkspaceId(activeId);
+  }, [activeId]);
+
+  useEffect(() => {
+    saveSelectedModel(selectedModel);
+  }, [selectedModel]);
+
+  // Load backend provider/model capabilities once
   useEffect(() => {
     fetch('/api/status')
-      .then((res) => res.json())
-      .then((data) => {
-        setServiceStatus(data);
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: ServiceStatus | null) => {
+        if (data?.availableModels && data.availableModels.length > 0) {
+          setAvailableModels(data.availableModels);
+          const topModel = data.availableModels[0];
+          const savedExists = data.availableModels.some((m) => m.id === selectedModel);
+          if (
+            !savedExists ||
+            (topModel.provider === 'openrouter' && !selectedModel.startsWith('openrouter/'))
+          ) {
+            setSelectedModel(topModel.id);
+          }
+        }
       })
-      .catch((err) => console.warn('Could not fetch status:', err));
+      .catch(() => {});
   }, []);
 
-  // Cleanup speech recognition on unmount
-  useEffect(() => {
-    return () => {
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.stop();
-        } catch {
-          // ignore
-        }
-      }
-    };
-  }, []);
+  const activeTrip = useMemo(
+    () => workspaces.find((w) => w.id === activeId) || workspaces[0],
+    [workspaces, activeId]
+  );
 
-  // Toggle voice-to-text input via Web Speech API
-  const toggleListening = () => {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      setSpeechError('Speech recognition is not supported in this browser.');
-      setTimeout(() => setSpeechError(null), 4000);
+  const updateActiveTrip = useCallback(
+    (updater: (prev: TripWorkspace) => TripWorkspace) => {
+      setWorkspaces((prevList) =>
+        prevList.map((w) =>
+          w.id === (activeTrip?.id || activeId)
+            ? { ...updater(w), updatedAt: new Date().toISOString() }
+            : w
+        )
+      );
+    },
+    [activeTrip?.id, activeId]
+  );
+
+  const handleCreateNewTrip = () => {
+    const fresh = createNewWorkspace();
+    setWorkspaces((prev) => [fresh, ...prev]);
+    setActiveId(fresh.id);
+    setActiveTab('itinerary');
+    setPlanBTarget(null);
+    setPlanBResults([]);
+    setPlanBNote(null);
+    setErrorMsg(null);
+  };
+
+  const handleDeleteCurrentTrip = () => {
+    if (workspaces.length <= 1) {
+      const fresh = createNewWorkspace();
+      setWorkspaces([fresh]);
+      setActiveId(fresh.id);
       return;
     }
+    const remaining = workspaces.filter((w) => w.id !== activeTrip.id);
+    setWorkspaces(remaining);
+    setActiveId(remaining[0].id);
+  };
 
-    if (isListening) {
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.stop();
-        } catch {
-          // ignore
-        }
-      }
-      setIsListening(false);
-      return;
-    }
-
-    try {
-      const recognition = new SpeechRecognition();
-      recognition.continuous = false;
-      recognition.interimResults = true;
-      recognition.lang = 'en-US';
-
-      recognition.onstart = () => {
-        setIsListening(true);
-        setSpeechError(null);
-      };
-
-      recognition.onresult = (event: any) => {
-        let transcript = '';
-        for (let i = 0; i < event.results.length; i++) {
-          transcript += event.results[i][0].transcript;
-        }
-        if (transcript) {
-          setInput(transcript);
-        }
-      };
-
-      recognition.onerror = (event: any) => {
-        console.warn('Speech recognition error:', event.error);
-        setIsListening(false);
-        if (event.error === 'not-allowed') {
-          setSpeechError('Microphone access was denied. Please allow microphone permissions.');
-        } else if (event.error !== 'no-speech') {
-          setSpeechError(`Speech recognition: ${event.error}`);
-        }
-        setTimeout(() => setSpeechError(null), 4000);
-      };
-
-      recognition.onend = () => {
-        setIsListening(false);
-      };
-
-      recognitionRef.current = recognition;
-      recognition.start();
-    } catch (err: any) {
-      console.warn('Failed to start speech recognition:', err);
-      setIsListening(false);
-      setSpeechError('Could not start microphone voice input.');
-      setTimeout(() => setSpeechError(null), 4000);
+  const handleModeChange = (mode: WorkspaceMode) => {
+    updateActiveTrip((t) => ({ ...t, mode }));
+    if (mode === 'live') {
+      setActiveTab('live');
+    } else if (activeTab === 'live') {
+      setActiveTab('itinerary');
     }
   };
 
-  // Scroll to bottom when messages or progress changes
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isLoading, currentStatusText]);
-
-  const handleClearTrip = () => {
-    setMessages([]);
-    setActiveParsedDetails(null);
-    setActiveFlightInfo('');
-    setActiveHotelInfo('');
-    setActiveItineraryInfo('');
-    setCurrentNode(null);
-    setCompletedNodes([]);
-    setCurrentStatusText('');
+  const handleToggleLocalFriend = () => {
+    updateActiveTrip((t) => ({ ...t, localFriendMode: !t.localFriendMode }));
   };
 
-  const handleSendPrompt = async (textToSend?: string) => {
-    const prompt = (textToSend || input).trim();
-    if (!prompt || isLoading) return;
+  // Conversational Turn
+  const handleSendMessage = async (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed || isChatLoading) return;
+    setErrorMsg(null);
 
-    setInput('');
-
-    // Add user message
     const userMsg: ChatMessage = {
-      id: crypto.randomUUID(),
+      id: `msg-u-${Date.now()}`,
       role: 'user',
-      content: prompt,
-      timestamp: Date.now(),
+      content: trimmed,
+      timestamp: new Date().toISOString(),
     };
 
-    setMessages((prev) => [...prev, userMsg]);
-    setIsLoading(true);
-    setCurrentNode('orchestrator');
-    setCompletedNodes([]);
-    setCurrentStatusText('🚀 TripBuddy is initializing planner agents...');
+    const snapshotTrip: TripWorkspace = {
+      ...activeTrip,
+      messages: [...activeTrip.messages, userMsg],
+    };
 
-    let parsedAcc: ParsedTripDetails | undefined;
-    let flightAcc = '';
-    let hotelAcc = '';
-    let itineraryAcc = '';
-    let groundingSourcesAcc: any[] = [];
-    let searchQueriesAcc: string[] = [];
+    updateActiveTrip((t) => ({
+      ...t,
+      messages: [...t.messages, userMsg],
+    }));
 
+    setIsChatLoading(true);
     try {
-      let response = await fetch('/api/plan/stream', {
+      const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_request: prompt }),
+        body: JSON.stringify({
+          trip: snapshotTrip,
+          userMessage: trimmed,
+          model: selectedModel,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Could not reach TripBuddy AI.');
+      }
+
+      const turn = data as ChatTurnResponse;
+      const assistantMsg: ChatMessage = {
+        id: `msg-a-${Date.now()}`,
+        role: 'assistant',
+        content: turn.reply,
+        timestamp: new Date().toISOString(),
+        quickReplies: turn.quickReplies,
+        sources: turn.sources,
+        appliedUpdates: turn.appliedUpdates,
+        modelUsed: turn.modelUsed,
+        localFriendMode: activeTrip.localFriendMode,
+      };
+
+      updateActiveTrip((t) => {
+        const patched = applyTripPatch(t, turn.tripPatch);
+        return {
+          ...patched,
+          messages: [...patched.messages, assistantMsg],
+        };
       });
 
-      // If streaming returns 404 or fails, fallback to direct JSON endpoint /api/plan
-      if (!response.ok && response.status === 404) {
-        console.warn('Streaming endpoint 404, attempting fallback to direct JSON API /api/plan...');
-        response = await fetch('/api/plan', {
+      // Automatically fetch live weather once a destination is newly established
+      if (turn.tripPatch?.destination && turn.tripPatch.destination !== activeTrip.destination) {
+        fetch('/api/weather', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user_request: prompt }),
-        });
-
-        if (response.ok) {
-          const data = await response.json();
-          setCompletedNodes(['orchestrator', 'flight_agent', 'hotel_agent', 'itinerary_agent', 'synthesizer']);
-          const assistantMsg: ChatMessage = {
-            id: crypto.randomUUID(),
-            role: 'assistant',
-            content: data.final_plan,
-            timestamp: Date.now(),
-            parsed: data.parsed,
-            flight_info: data.flight_info,
-            hotel_info: data.hotel_info,
-            itinerary_info: data.itinerary_info,
-            grounding_sources: data.grounding_sources,
-            search_queries: data.search_queries,
-          };
-          setMessages((prev) => [...prev, assistantMsg]);
-          setIsLoading(false);
-          setCurrentNode(null);
-          setCurrentStatusText('');
-          return;
-        }
-      }
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
-
-      if (!reader) throw new Error('No readable stream available.');
-
-      let planReceived = false;
-      let buffer = '';
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-
-        // SSE messages are delimited by double-newline \n\n
-        let boundaryIndex = buffer.indexOf('\n\n');
-        while (boundaryIndex !== -1) {
-          const rawMessage = buffer.slice(0, boundaryIndex);
-          buffer = buffer.slice(boundaryIndex + 2);
-
-          let eventType = 'message';
-          let dataContent = '';
-
-          const lines = rawMessage.split('\n');
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (trimmed.startsWith('event:')) {
-              eventType = trimmed.slice(6).trim();
-            } else if (trimmed.startsWith('data:')) {
-              const slice = trimmed.slice(5).trim();
-              dataContent += (dataContent ? '\n' : '') + slice;
+          body: JSON.stringify({
+            destination: turn.tripPatch.destination,
+            country: turn.tripPatch.country,
+            lat: turn.tripPatch.lat,
+            lon: turn.tripPatch.lon,
+          }),
+        })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((weather) => {
+            if (weather?.currentTemp !== undefined) {
+              updateActiveTrip((t) => ({ ...t, weather }));
             }
-          }
-
-          if (dataContent) {
-            try {
-              const data = JSON.parse(dataContent);
-
-              if (eventType === 'status') {
-                setCurrentNode(data.node);
-                setCurrentStatusText(data.title || data.description);
-                if (data.node === 'flight_agent') {
-                  setCompletedNodes((prev) => Array.from(new Set([...prev, 'orchestrator'])));
-                } else if (data.node === 'hotel_agent') {
-                  setCompletedNodes((prev) => Array.from(new Set([...prev, 'orchestrator', 'flight_agent'])));
-                } else if (data.node === 'itinerary_agent') {
-                  setCompletedNodes((prev) => Array.from(new Set([...prev, 'orchestrator', 'flight_agent', 'hotel_agent'])));
-                } else if (data.node === 'synthesizer') {
-                  setCompletedNodes((prev) => Array.from(new Set([...prev, 'orchestrator', 'flight_agent', 'hotel_agent', 'itinerary_agent'])));
-                }
-              } else if (eventType === 'orchestrator_complete') {
-                parsedAcc = data.parsed;
-                setActiveParsedDetails(data.parsed);
-              } else if (eventType === 'flight_complete') {
-                flightAcc = data.flight_info;
-                setActiveFlightInfo(data.flight_info);
-                if (data.grounding_sources) groundingSourcesAcc.push(...data.grounding_sources);
-                if (data.search_queries) searchQueriesAcc.push(...data.search_queries);
-              } else if (eventType === 'hotel_complete') {
-                hotelAcc = data.hotel_info;
-                setActiveHotelInfo(data.hotel_info);
-                if (data.grounding_sources) groundingSourcesAcc.push(...data.grounding_sources);
-              } else if (eventType === 'itinerary_complete') {
-                itineraryAcc = data.itinerary_info;
-                setActiveItineraryInfo(data.itinerary_info);
-              } else if (eventType === 'complete') {
-                planReceived = true;
-                setCompletedNodes(['orchestrator', 'flight_agent', 'hotel_agent', 'itinerary_agent', 'synthesizer']);
-                const assistantMsg: ChatMessage = {
-                  id: crypto.randomUUID(),
-                  role: 'assistant',
-                  content: data.final_plan,
-                  timestamp: Date.now(),
-                  parsed: data.parsed || parsedAcc,
-                  flight_info: data.flight_info || flightAcc,
-                  hotel_info: data.hotel_info || hotelAcc,
-                  itinerary_info: data.itinerary_info || itineraryAcc,
-                  grounding_sources: data.grounding_sources || groundingSourcesAcc,
-                  search_queries: data.search_queries || searchQueriesAcc,
-                };
-                setMessages((prev) => [...prev, assistantMsg]);
-                setIsLoading(false);
-                setCurrentNode(null);
-                setCurrentStatusText('');
-              } else if (eventType === 'error') {
-                planReceived = true;
-                const errorMsg: ChatMessage = {
-                  id: crypto.randomUUID(),
-                  role: 'assistant',
-                  content: `⚠️ Trip planning note:\n\n${data.message || 'Could not complete the plan.'}\n\nPlease verify that your Gemini API key is configured and try again.`,
-                  timestamp: Date.now(),
-                };
-                setMessages((prev) => [...prev, errorMsg]);
-                setIsLoading(false);
-                setCurrentNode(null);
-                setCurrentStatusText('');
-                return;
-              }
-            } catch (jsonErr) {
-              console.warn('Error parsing complete SSE event block:', jsonErr);
-            }
-          }
-
-          boundaryIndex = buffer.indexOf('\n\n');
-        }
-      }
-
-      // If the stream finished without a complete message (e.g. stream dropped or parse skipped), directly fetch full plan via POST /api/plan
-      if (!planReceived) {
-        console.warn('Stream finished without complete event; retrieving plan directly via POST /api/plan...');
-        const directRes = await fetch('/api/plan', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user_request: prompt }),
-        });
-
-        if (directRes.ok) {
-          const data = await directRes.json();
-          planReceived = true;
-          setCompletedNodes(['orchestrator', 'flight_agent', 'hotel_agent', 'itinerary_agent', 'synthesizer']);
-          const assistantMsg: ChatMessage = {
-            id: crypto.randomUUID(),
-            role: 'assistant',
-            content: data.final_plan,
-            timestamp: Date.now(),
-            parsed: data.parsed || parsedAcc,
-            flight_info: data.flight_info || flightAcc,
-            hotel_info: data.hotel_info || hotelAcc,
-            itinerary_info: data.itinerary_info || itineraryAcc,
-            grounding_sources: data.grounding_sources || groundingSourcesAcc,
-            search_queries: data.search_queries || searchQueriesAcc,
-          };
-          setMessages((prev) => [...prev, assistantMsg]);
-        }
+          })
+          .catch(() => {});
       }
     } catch (err: any) {
-      console.error('Trip planning failed:', err);
-      const errorMsg: ChatMessage = {
-        id: crypto.randomUUID(),
-        role: 'assistant',
-        content: `Something went wrong while planning the trip:\n\n\`${err.message || 'Unknown error'}\`\n\nPlease verify that your server has an active connection and retry.`,
-        timestamp: Date.now(),
-      };
-      setMessages((prev) => [...prev, errorMsg]);
+      setErrorMsg(err?.message || 'Unexpected error during chat.');
     } finally {
-      setIsLoading(false);
-      setCurrentNode(null);
-      setCurrentStatusText('');
+      setIsChatLoading(false);
     }
   };
 
-  return (
-    <div className="flex h-screen w-screen overflow-hidden bg-slate-950 text-slate-100 font-sans">
-      {/* Sidebar */}
-      <Sidebar
-        currentModel={currentModel}
-        onModelChange={setCurrentModel}
-        onClearTrip={handleClearTrip}
-        serviceStatus={serviceStatus}
-        onSelectPrompt={(p) => handleSendPrompt(p)}
-        tripDetails={activeParsedDetails}
-      />
+  // Pace & Energy Optimizer
+  const handleUpdatePace = (paceProfile: PaceEnergyProfile) => {
+    updateActiveTrip((t) => ({ ...t, paceProfile }));
+  };
 
-      {/* Main Content Area */}
-      <main className="flex-1 flex flex-col h-full overflow-hidden bg-slate-950">
-        {/* Top Header */}
-        <header className="px-8 py-5 border-b border-slate-800/80 bg-slate-900/40 backdrop-blur shrink-0 flex items-center justify-between">
-          <div>
-            <h1 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
-              ✈️ TripBuddy
-            </h1>
-            <p className="text-xs text-slate-400 font-medium mt-0.5">
-              Your friend who actually plans the trip.
-            </p>
+  const handleReoptimizeForPace = () => {
+    const p = activeTrip.paceProfile;
+    const wakeText =
+      p.wakeWindow === 'early'
+        ? 'early bird (7:00 AM starts)'
+        : p.wakeWindow === 'late'
+        ? 'late riser (nothing before 10:30 AM)'
+        : 'balanced (9:00 AM starts)';
+    handleSendMessage(
+      `Re-optimize my current itinerary around my Travel Pace & Energy settings: ${wakeText}, ${p.pace} daily pace, ${p.walkingTolerance} walking tolerance, and ~${p.restBufferMinutes} min rest buffers. Keep the best stops and adjust times & density.`
+    );
+  };
+
+  // Stop Mutations
+  const handleToggleStopCompleted = (dayNum: number, stopId: string) => {
+    updateActiveTrip((t) => ({
+      ...t,
+      days: t.days.map((d) =>
+        d.day !== dayNum
+          ? d
+          : {
+              ...d,
+              stops: d.stops.map((s) =>
+                s.id !== stopId
+                  ? s
+                  : { ...s, status: s.status === 'completed' ? 'planned' : 'completed' }
+              ),
+            }
+      ),
+    }));
+  };
+
+  const handleDeleteStop = (dayNum: number, stopId: string) => {
+    updateActiveTrip((t) => ({
+      ...t,
+      days: t.days.map((d) =>
+        d.day !== dayNum ? d : { ...d, stops: d.stops.filter((s) => s.id !== stopId) }
+      ),
+    }));
+  };
+
+  const handleRemoveCustomSection = (sectionId: string) => {
+    updateActiveTrip((t) => ({
+      ...t,
+      customSections: t.customSections.filter((s) => s.id !== sectionId),
+    }));
+  };
+
+  // Live Weather & Adaptation
+  const handleFetchWeather = async (lat?: number, lon?: number, label?: string) => {
+    setIsPanelBusy(true);
+    setErrorMsg(null);
+    try {
+      const res = await fetch('/api/weather', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          destination: label || activeTrip.destination,
+          country: label ? undefined : activeTrip.country,
+          lat,
+          lon,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Could not load weather.');
+      updateActiveTrip((t) => ({ ...t, weather: data }));
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Weather lookup failed.');
+    } finally {
+      setIsPanelBusy(false);
+    }
+  };
+
+  const handleAdaptWeather = async () => {
+    setIsPanelBusy(true);
+    setErrorMsg(null);
+    try {
+      const res = await fetch('/api/weather/adapt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trip: activeTrip, model: selectedModel }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Weather adaptation failed.');
+
+      const msg: ChatMessage = {
+        id: `msg-wx-${Date.now()}`,
+        role: 'assistant',
+        timestamp: new Date().toISOString(),
+        content: `**Weather-Adaptive Update:** ${data.summary}`,
+        appliedUpdates: data.changes?.length ? data.changes : ['Rearranged itinerary for live weather forecast'],
+        sources: data.sources,
+        modelUsed: data.modelUsed,
+      };
+
+      updateActiveTrip((t) => ({
+        ...t,
+        weather: data.weather || t.weather,
+        days: data.adaptedDays || t.days,
+        messages: [...t.messages, msg],
+      }));
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Could not adapt itinerary for weather.');
+    } finally {
+      setIsPanelBusy(false);
+    }
+  };
+
+  // Live Companion Suggestions
+  const handleGetLiveSuggestions = async (params: {
+    locationLabel: string;
+    lat?: number;
+    lon?: number;
+    remainingHours: number;
+    mood: string;
+  }) => {
+    setIsPanelBusy(true);
+    setErrorMsg(null);
+    try {
+      const res = await fetch('/api/live/suggest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          trip: activeTrip,
+          ...params,
+          model: selectedModel,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Live suggestions failed.');
+
+      const msg: ChatMessage = {
+        id: `msg-live-${Date.now()}`,
+        role: 'assistant',
+        timestamp: new Date().toISOString(),
+        content: data.summary,
+        appliedUpdates: [`Found ${data.suggestions?.length || 0} right-now suggestions near ${params.locationLabel || activeTrip.destination}`],
+        sources: data.sources,
+        modelUsed: data.modelUsed,
+      };
+
+      updateActiveTrip((t) => ({
+        ...t,
+        weather: data.weather || t.weather,
+        liveSuggestions: data.suggestions || [],
+        messages: [...t.messages, msg],
+      }));
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Could not fetch live suggestions.');
+    } finally {
+      setIsPanelBusy(false);
+    }
+  };
+
+  const handleAddLiveSuggestionToDay = (suggestion: LiveSuggestion, dayNum: number) => {
+    const newStop: ItineraryStop = {
+      id: `stop-live-${Date.now()}`,
+      day: dayNum,
+      timeWindow: 'Right Now',
+      title: suggestion.title,
+      neighborhood: suggestion.neighborhood,
+      description: `${suggestion.whyNow}${suggestion.localTip ? ` Tip: ${suggestion.localTip}` : ''}`,
+      category: suggestion.category,
+      indoorOutdoor: suggestion.indoorOutdoor,
+      estimatedCost: suggestion.estimatedCost,
+      lat: suggestion.lat,
+      lon: suggestion.lon,
+      status: 'planned',
+    };
+
+    updateActiveTrip((t) => {
+      if (t.days.length === 0) {
+        return {
+          ...t,
+          durationDays: Math.max(1, t.durationDays),
+          days: [{ day: 1, title: 'Live Day Plan', stops: [newStop] }],
+        };
+      }
+      return {
+        ...t,
+        days: t.days.map((d) =>
+          d.day === dayNum ? { ...d, stops: [...d.stops, newStop] } : d
+        ),
+      };
+    });
+  };
+
+  // Plan B Generator
+  const handleRunPlanB = async (reason: string, stop?: ItineraryStop | null) => {
+    setIsPanelBusy(true);
+    setErrorMsg(null);
+    try {
+      const res = await fetch('/api/plan-b', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          trip: activeTrip,
+          cancelledStop: stop || undefined,
+          reason,
+          model: selectedModel,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Plan B generation failed.');
+      setPlanBResults(data.alternatives || []);
+      setPlanBNote(data.note || null);
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Could not generate Plan B alternatives.');
+    } finally {
+      setIsPanelBusy(false);
+    }
+  };
+
+  const handleTriggerPlanBFromStop = (stop: ItineraryStop) => {
+    setPlanBTarget(stop);
+    setPlanBResults([]);
+    setPlanBNote(null);
+    setActiveTab('live');
+    setMobilePane('cockpit');
+    handleRunPlanB(`Need an immediate Plan B for "${stop.title}" (closed, crowded, or weather disrupted)`, stop);
+  };
+
+  const handleApplyPlanBSwap = (
+    alt: PlanBAlternative,
+    targetStop: ItineraryStop | null,
+    dayNum: number
+  ) => {
+    const replacement: ItineraryStop = {
+      id: `stop-planb-${Date.now()}`,
+      day: targetStop?.day || dayNum,
+      timeWindow: targetStop?.timeWindow || 'Flexible',
+      title: alt.title,
+      neighborhood: alt.neighborhood,
+      description: `${alt.reason} (${alt.openStatus})`,
+      category: alt.category,
+      indoorOutdoor: alt.indoorOutdoor,
+      estimatedCost: alt.estimatedCost,
+      lat: alt.lat,
+      lon: alt.lon,
+      status: 'swapped',
+    };
+
+    updateActiveTrip((t) => {
+      let nextDays = t.days;
+      if (targetStop) {
+        nextDays = t.days.map((d) =>
+          d.day !== targetStop.day
+            ? d
+            : {
+                ...d,
+                stops: d.stops.map((s) => (s.id === targetStop.id ? replacement : s)),
+              }
+        );
+      } else if (t.days.length === 0) {
+        nextDays = [{ day: 1, title: 'Live Plan', stops: [replacement] }];
+      } else {
+        nextDays = t.days.map((d) =>
+          d.day === dayNum ? { ...d, stops: [...d.stops, replacement] } : d
+        );
+      }
+
+      const swapNote: ChatMessage = {
+        id: `msg-pb-${Date.now()}`,
+        role: 'assistant',
+        timestamp: new Date().toISOString(),
+        content: targetStop
+          ? `Swapped **${targetStop.title}** out for Plan B: **${alt.title}** (${alt.neighborhood}).`
+          : `Added Plan B option **${alt.title}** (${alt.neighborhood}) to Day ${dayNum}.`,
+        appliedUpdates: [`Applied Plan B: ${alt.title}`],
+      };
+
+      return {
+        ...t,
+        days: nextDays,
+        messages: [...t.messages, swapNote],
+      };
+    });
+
+    setPlanBTarget(null);
+    setPlanBResults([]);
+    setPlanBNote(null);
+    setActiveTab('itinerary');
+  };
+
+  // Budget & Reality Check
+  const handleUpdateBudgetMeta = (updates: {
+    targetBudget?: number;
+    currency?: string;
+    travelersCount?: number;
+  }) => {
+    updateActiveTrip((t) => ({
+      ...t,
+      targetBudget: updates.targetBudget !== undefined ? updates.targetBudget : t.targetBudget,
+      currency: updates.currency ? updates.currency.toUpperCase() : t.currency,
+      currencySymbol: updates.currency ? getCurrencySymbol(updates.currency) : t.currencySymbol,
+      travelersCount:
+        updates.travelersCount !== undefined ? updates.travelersCount : t.travelersCount,
+    }));
+  };
+
+  const handleAddExpense = (expense: Omit<ExpenseEntry, 'id'>) => {
+    const entry: ExpenseEntry = {
+      ...expense,
+      id: `exp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    };
+    updateActiveTrip((t) => ({
+      ...t,
+      expenses: [entry, ...t.expenses],
+    }));
+  };
+
+  const handleDeleteExpense = (id: string) => {
+    updateActiveTrip((t) => ({
+      ...t,
+      expenses: t.expenses.filter((e) => e.id !== id),
+    }));
+  };
+
+  const handleRunRealityCheck = async (overrideBudget?: number, overrideCurrency?: string) => {
+    setIsPanelBusy(true);
+    setErrorMsg(null);
+    try {
+      const res = await fetch('/api/budget/reality-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          trip: activeTrip,
+          overrideBudget,
+          overrideCurrency,
+          model: selectedModel,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Cost reality check failed.');
+
+      const msg: ChatMessage = {
+        id: `msg-rc-${Date.now()}`,
+        role: 'assistant',
+        timestamp: new Date().toISOString(),
+        content: `**Cost Reality Check (${data.result.verdict.toUpperCase()}):** ${data.result.headline}\n\n${data.result.summary}`,
+        appliedUpdates: ['Updated AI Trip Cost Reality Check in Budget panel'],
+        sources: data.result.sources,
+        modelUsed: data.modelUsed,
+      };
+
+      updateActiveTrip((t) => ({
+        ...t,
+        realityCheck: data.result,
+        messages: [...t.messages, msg],
+      }));
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Could not complete cost reality check.');
+    } finally {
+      setIsPanelBusy(false);
+    }
+  };
+
+  // Group Decision Maker
+  const handleAddGroupMember = (member: Omit<GroupMember, 'id'>) => {
+    const newMember: GroupMember = {
+      ...member,
+      id: `grp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    };
+    updateActiveTrip((t) => {
+      const nextMembers = [...t.groupMembers, newMember];
+      return {
+        ...t,
+        groupMembers: nextMembers,
+        travelersCount: Math.max(t.travelersCount, nextMembers.length),
+      };
+    });
+  };
+
+  const handleRemoveGroupMember = (id: string) => {
+    updateActiveTrip((t) => ({
+      ...t,
+      groupMembers: t.groupMembers.filter((m) => m.id !== id),
+    }));
+  };
+
+  const handleSynthesizeGroup = async () => {
+    setIsPanelBusy(true);
+    setErrorMsg(null);
+    try {
+      const res = await fetch('/api/group/synthesize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          trip: activeTrip,
+          members: activeTrip.groupMembers,
+          model: selectedModel,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Group synthesis failed.');
+
+      const msg: ChatMessage = {
+        id: `msg-grp-${Date.now()}`,
+        role: 'assistant',
+        timestamp: new Date().toISOString(),
+        content: data.reply,
+        appliedUpdates: [
+          `Synthesized group consensus itinerary for ${activeTrip.groupMembers.length} travelers`,
+        ],
+        sources: data.sources,
+        modelUsed: data.modelUsed,
+      };
+
+      updateActiveTrip((t) => ({
+        ...t,
+        days: data.days?.length ? data.days : t.days,
+        budgetEstimate: data.budgetEstimate || t.budgetEstimate,
+        groupConsensus: data.consensus,
+        messages: [...t.messages, msg],
+      }));
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Group synthesis failed.');
+    } finally {
+      setIsPanelBusy(false);
+    }
+  };
+
+  // Discover: Surprise Me & Local Friend Hidden Gems
+  const handleRunSurpriseMe = async (params: {
+    origin: string;
+    budget: number;
+    currency: string;
+    durationDays: number;
+    personality: string;
+    vibe: string;
+  }) => {
+    setIsPanelBusy(true);
+    setErrorMsg(null);
+    try {
+      const res = await fetch('/api/discover/surprise', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...params, model: selectedModel }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Surprise Me failed.');
+
+      updateActiveTrip((t) => ({
+        ...t,
+        surprisePitches: data.pitches || [],
+      }));
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Surprise Me discovery failed.');
+    } finally {
+      setIsPanelBusy(false);
+    }
+  };
+
+  const handleLaunchSurpriseTrip = (pitch: SurprisePitch) => {
+    updateActiveTrip((t) => ({
+      ...t,
+      title: `${pitch.destination} · ${pitch.durationDays}d`,
+      destination: pitch.destination,
+      country: pitch.country,
+      lat: pitch.lat,
+      lon: pitch.lon,
+      durationDays: pitch.durationDays,
+      targetBudget: pitch.estimatedTotal,
+      currency: pitch.currency,
+      currencySymbol: pitch.currencySymbol,
+    }));
+    setActiveTab('itinerary');
+    handleSendMessage(
+      `I love the Surprise Me pick: ${pitch.destination}, ${pitch.country} for ${pitch.durationDays} days around ${pitch.currencySymbol}${pitch.estimatedTotal} ${pitch.currency}. Before building the full itinerary, ask me 2 quick questions to dial in my pace and must-dos, or build Day 1–${pitch.durationDays} if you already have enough.`
+    );
+  };
+
+  const handleRunLocalGems = async (destination: string, focus: string) => {
+    setIsPanelBusy(true);
+    setErrorMsg(null);
+    try {
+      const res = await fetch('/api/discover/gems', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          destination,
+          focus,
+          currency: activeTrip.currency,
+          model: selectedModel,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Local gems lookup failed.');
+
+      const msg: ChatMessage = {
+        id: `msg-gems-${Date.now()}`,
+        role: 'assistant',
+        timestamp: new Date().toISOString(),
+        content: data.localIntro,
+        appliedUpdates: [`Pinned ${data.gems?.length || 0} local hidden gems in ${destination}`],
+        sources: data.sources,
+        modelUsed: data.modelUsed,
+        localFriendMode: true,
+      };
+
+      updateActiveTrip((t) => ({
+        ...t,
+        destination: t.destination || destination,
+        hiddenGems: data.gems || [],
+        messages: [...t.messages, msg],
+      }));
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Could not find local hidden gems.');
+    } finally {
+      setIsPanelBusy(false);
+    }
+  };
+
+  const handleToggleGemPin = (gemId: string) => {
+    updateActiveTrip((t) => ({
+      ...t,
+      hiddenGems: t.hiddenGems.map((g) =>
+        g.id === gemId ? { ...g, pinnedOnMap: !g.pinnedOnMap } : g
+      ),
+    }));
+  };
+
+  const handleAddGemToDay = (gem: HiddenGemItem, dayNum: number) => {
+    const stop: ItineraryStop = {
+      id: `stop-gem-${Date.now()}`,
+      day: dayNum,
+      timeWindow: gem.bestTime || 'Afternoon',
+      title: gem.title,
+      neighborhood: gem.neighborhood,
+      description: `${gem.whyLocalsLoveIt}${gem.insiderTip ? ` Local tip: ${gem.insiderTip}` : ''}`,
+      category: 'hidden-gem',
+      indoorOutdoor: 'mixed',
+      estimatedCost: gem.estimatedCost,
+      lat: gem.lat,
+      lon: gem.lon,
+      status: 'planned',
+      isHiddenGem: true,
+    };
+
+    updateActiveTrip((t) => {
+      if (t.days.length === 0) {
+        return {
+          ...t,
+          durationDays: Math.max(1, t.durationDays),
+          days: [{ day: 1, title: `${t.destination || 'Local'} Exploration`, stops: [stop] }],
+        };
+      }
+      return {
+        ...t,
+        days: t.days.map((d) =>
+          d.day === dayNum ? { ...d, stops: [...d.stops, stop] } : d
+        ),
+      };
+    });
+    setActiveTab('itinerary');
+  };
+
+  const navItems: { id: CockpitTab; label: string; icon: React.ReactNode }[] = [
+    { id: 'itinerary', label: 'Itinerary & Map', icon: <MapIcon className="w-3.5 h-3.5" /> },
+    { id: 'live', label: 'Live Companion', icon: <Navigation className="w-3.5 h-3.5" /> },
+    { id: 'budget', label: 'Budget', icon: <Wallet className="w-3.5 h-3.5" /> },
+    { id: 'group', label: 'Group', icon: <Users className="w-3.5 h-3.5" /> },
+    { id: 'discover', label: 'Discover', icon: <Sparkles className="w-3.5 h-3.5" /> },
+  ];
+
+  // Unboxed typographic telemetry summary for active trip
+  const tripSummaryLine = [
+    activeTrip.destination
+      ? [activeTrip.destination, activeTrip.country].filter(Boolean).join(', ')
+      : 'No destination locked yet',
+    activeTrip.durationDays ? `${activeTrip.durationDays} Days` : null,
+    activeTrip.targetBudget
+      ? formatMoney(activeTrip.targetBudget, activeTrip.currency, activeTrip.currencySymbol)
+      : null,
+    activeTrip.weather
+      ? `${activeTrip.weather.currentTemp}°C ${activeTrip.weather.currentCondition}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
+  return (
+    <>
+      <div className="no-print h-screen w-screen overflow-hidden flex flex-col bg-[#0B1120] text-slate-100">
+        {/* Strict 3-Zone Top Bar */}
+        <header className="h-14 px-4 lg:px-6 border-b border-[#24324A] bg-[#0B1120] flex items-center justify-between gap-6 shrink-0">
+          {/* Zone 1: Brand + Saved Trip Switcher */}
+          <div className="flex items-center gap-3 min-w-0 shrink-0">
+            <div className="flex items-center gap-2 whitespace-nowrap">
+              <Compass className="w-5 h-5 text-cyan-400 shrink-0" />
+              <span className="text-sm font-bold tracking-tight text-slate-50">TripBuddy</span>
+            </div>
+
+            <span className="text-slate-600 hidden sm:inline">/</span>
+
+            <div className="hidden sm:flex items-center gap-1">
+              <select
+                value={activeTrip.id}
+                onChange={(e) => setActiveId(e.target.value)}
+                aria-label="Select saved trip"
+                className="max-w-[190px] bg-transparent hover:bg-[#131C2E] border border-transparent hover:border-[#24324A] rounded-md px-2 py-1 text-xs font-medium text-slate-200 focus:outline-none truncate cursor-pointer"
+              >
+                {workspaces.map((w) => (
+                  <option key={w.id} value={w.id} className="bg-[#0F172A] text-slate-100">
+                    {w.title}
+                  </option>
+                ))}
+              </select>
+
+              <button
+                type="button"
+                onClick={handleDeleteCurrentTrip}
+                className="p-1 text-slate-500 hover:text-red-400 transition cursor-pointer"
+                title="Delete or reset active trip"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
-          <div className="flex items-center gap-2 text-xs">
-            <span className="px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-300 font-mono">
-              v1.0.0 (Node.js)
-            </span>
+
+          {/* Zone 2: Single-line Center View Links */}
+          <nav className="hidden md:flex items-center gap-1 lg:gap-2 overflow-x-auto">
+            {navItems.map((item) => {
+              const isActive = activeTab === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => {
+                    setActiveTab(item.id);
+                    setMobilePane('cockpit');
+                  }}
+                  className={`px-3 py-1.5 text-xs font-medium whitespace-nowrap transition flex items-center gap-1.5 border-b-2 cursor-pointer ${
+                    isActive
+                      ? 'border-cyan-400 text-cyan-300'
+                      : 'border-transparent text-slate-400 hover:text-slate-100'
+                  }`}
+                >
+                  {item.icon}
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+
+          {/* Zone 3: Single Primary CTA */}
+          <div className="shrink-0">
+            <button
+              type="button"
+              onClick={handleCreateNewTrip}
+              className="px-3.5 py-1.5 rounded-md bg-cyan-500 hover:bg-cyan-400 text-[#0B1120] font-semibold text-xs whitespace-nowrap transition flex items-center gap-1.5 cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>New Trip</span>
+            </button>
           </div>
         </header>
 
-        {/* Chat / Messages Container */}
-        <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6 max-w-5xl mx-auto w-full">
-          {/* Welcome Message if no user messages yet */}
-          {messages.length === 0 && (
-            <div className="rounded-2xl bg-slate-900/90 border border-slate-800 p-6 shadow-xl space-y-4">
-              <div className="flex items-center gap-3 border-b border-slate-800 pb-4">
-                <div className="w-10 h-10 rounded-xl bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-xl">
-                  ✈️
-                </div>
-                <div>
-                  <h2 className="text-base font-bold text-white">Let's plan your dream getaway</h2>
-                  <p className="text-xs text-slate-400">Tell me where you want to go, budget, and your travel vibe</p>
-                </div>
-              </div>
-
-              <div className="prose prose-invert prose-indigo text-sm leading-relaxed max-w-none text-slate-300">
-                <p>
-                  Planning a trip usually means jumping between flight websites, hotel booking platforms, map tabs, blogs, and chaotic group chats.
-                  <strong> TripBuddy coordinates specialized AI agents</strong> to build a realistic, personalized trip for you.
-                </p>
-
-                <div className="p-4 rounded-xl bg-slate-800/50 border border-slate-700/60 font-medium text-slate-200 text-xs">
-                  <span className="text-indigo-400 font-semibold block mb-1">Example request:</span>
-                  "I want to spend 5 days in Manali, starting from Delhi. My budget is ₹15,000. I love photography, nature and cafes. I prefer relaxed trips and absolutely hate waking up early."
-                </div>
-              </div>
-
-              {/* Quick suggestion buttons */}
-              <div className="pt-2">
-                <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 block mb-2">
-                  Try one of these:
-                </span>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                  <button
-                    onClick={() => handleSendPrompt('I want to spend 5 days in Manali, starting from Delhi. My budget is ₹15,000. I love photography, nature and cafes. I prefer relaxed trips and absolutely hate waking up early.')}
-                    className="p-3 rounded-xl bg-slate-800/80 hover:bg-slate-800 border border-slate-700 hover:border-indigo-500/60 text-left transition cursor-pointer group"
-                  >
-                    <div className="text-xs font-semibold text-white group-hover:text-indigo-300">
-                      🏔️ 5 Days in Manali from Delhi (₹15,000)
-                    </div>
-                    <div className="text-[11px] text-slate-400 mt-1 line-clamp-1">
-                      Photography, nature, cafes, relaxed mornings
-                    </div>
-                  </button>
-
-                  <button
-                    onClick={() => handleSendPrompt('Plan a weekend trip to Rishikesh from Delhi. My budget is ₹8,000. I want nature, adventure and good cafes.')}
-                    className="p-3 rounded-xl bg-slate-800/80 hover:bg-slate-800 border border-slate-700 hover:border-indigo-500/60 text-left transition cursor-pointer group"
-                  >
-                    <div className="text-xs font-semibold text-white group-hover:text-indigo-300">
-                      🌊 Weekend Adventure in Rishikesh (₹8,000)
-                    </div>
-                    <div className="text-[11px] text-slate-400 mt-1 line-clamp-1">
-                      River rafting, riverside cafes, budget adventure
-                    </div>
-                  </button>
-
-                  <button
-                    onClick={() => handleSendPrompt('Plan a 5-day trip to Bali for around $1,500. I prefer beaches, cafes and relaxed days. I don\'t want a packed schedule.')}
-                    className="p-3 rounded-xl bg-slate-800/80 hover:bg-slate-800 border border-slate-700 hover:border-indigo-500/60 text-left transition cursor-pointer group"
-                  >
-                    <div className="text-xs font-semibold text-white group-hover:text-indigo-300">
-                      🏖️ 5 Days in Bali ($1,500)
-                    </div>
-                    <div className="text-[11px] text-slate-400 mt-1 line-clamp-1">
-                      Beaches, sunset cafes, unhurried schedule
-                    </div>
-                  </button>
-
-                  <button
-                    onClick={() => handleSendPrompt('I\'m going to Rome for 6 days with a $2,000 budget. I\'m interested in history, architecture and Italian food.')}
-                    className="p-3 rounded-xl bg-slate-800/80 hover:bg-slate-800 border border-slate-700 hover:border-indigo-500/60 text-left transition cursor-pointer group"
-                  >
-                    <div className="text-xs font-semibold text-white group-hover:text-indigo-300">
-                      🏛️ 6 Days in Rome ($2,000)
-                    </div>
-                    <div className="text-[11px] text-slate-400 mt-1 line-clamp-1">
-                      Colosseum, historic trattorias, art & architecture
-                    </div>
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Conversation history */}
-          {messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={`flex gap-3.5 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-            >
-              {msg.role === 'assistant' && (
-                <div className="w-8 h-8 rounded-lg bg-indigo-600/30 border border-indigo-500/40 flex items-center justify-center shrink-0 text-sm mt-1">
-                  ✈️
-                </div>
-              )}
-
-              <div
-                className={`max-w-3xl ${
-                  msg.role === 'user'
-                    ? 'bg-indigo-600 text-white rounded-2xl rounded-tr-sm px-4 py-3 shadow-md text-sm leading-relaxed'
-                    : 'w-full'
-                }`}
-              >
-                {msg.role === 'user' ? (
-                  <p>{msg.content}</p>
-                ) : (
-                  <PlanCard
-                    content={msg.content}
-                    parsed={msg.parsed}
-                    flight_info={msg.flight_info}
-                    hotel_info={msg.hotel_info}
-                    itinerary_info={msg.itinerary_info}
-                    grounding_sources={msg.grounding_sources || msg.parsed?.grounding_sources}
-                    search_queries={msg.search_queries || msg.parsed?.search_queries}
-                  />
-                )}
-              </div>
-
-              {msg.role === 'user' && (
-                <div className="w-8 h-8 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center shrink-0 text-sm mt-1 text-slate-300">
-                  👤
-                </div>
-              )}
-            </div>
-          ))}
-
-          {/* Loading Progress Indicator */}
-          {isLoading && (
-            <div className="w-full">
-              <ProgressIndicator
-                currentNode={currentNode}
-                completedNodes={completedNodes}
-                currentStatusText={currentStatusText}
-              />
-            </div>
-          )}
-
-          <div ref={messagesEndRef} />
-        </div>
-
-        {/* Input Bar */}
-        <div className="p-4 border-t border-slate-800/80 bg-slate-900/60 backdrop-blur shrink-0">
-          {/* Speech error or active listening banner */}
-          {speechError && (
-            <div className="max-w-4xl mx-auto mb-2 px-3 py-1.5 rounded-lg bg-rose-950/60 border border-rose-500/40 text-rose-300 text-xs flex items-center justify-between animate-fadeIn">
-              <div className="flex items-center gap-2">
-                <AlertCircle className="w-3.5 h-3.5 text-rose-400" />
-                <span>{speechError}</span>
-              </div>
-              <button
-                onClick={() => setSpeechError(null)}
-                className="text-rose-400 hover:text-white text-xs font-bold px-1"
-              >
-                ✕
-              </button>
-            </div>
-          )}
-
-          {isListening && (
-            <div className="max-w-4xl mx-auto mb-2 px-3 py-1 rounded-lg bg-indigo-950/60 border border-indigo-500/40 text-indigo-200 text-xs flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="relative flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500"></span>
-                </span>
-                <span className="font-medium text-white">Listening... Speak now</span>
-                <span className="text-[11px] text-indigo-300">(Click microphone button again when done)</span>
-              </div>
-              <div className="flex items-center gap-0.5">
-                <span className="w-1 h-3 bg-rose-500 rounded-full animate-bounce [animation-delay:0ms]"></span>
-                <span className="w-1 h-4 bg-rose-400 rounded-full animate-bounce [animation-delay:150ms]"></span>
-                <span className="w-1 h-2 bg-rose-500 rounded-full animate-bounce [animation-delay:300ms]"></span>
-              </div>
-            </div>
-          )}
-
-          <div className="max-w-4xl mx-auto relative flex items-center">
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSendPrompt();
-                }
-              }}
-              placeholder={isListening ? "Listening... (e.g. 5 days in Manali from Delhi...)" : "Tell TripBuddy about your trip... (e.g. 5 days in Manali from Delhi, ₹15,000 budget, relaxed mornings)"}
-              disabled={isLoading}
-              className={`w-full bg-slate-800/90 border rounded-xl pl-4 pr-24 py-3 text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-2 disabled:opacity-50 transition shadow-inner font-medium ${
-                isListening
-                  ? 'border-rose-500/80 focus:ring-rose-500/40 ring-1 ring-rose-500/30'
-                  : 'border-slate-700 focus:ring-indigo-500/50 focus:border-indigo-500'
-              }`}
-            />
-
-            <div className="absolute right-2 flex items-center gap-1.5">
-              {/* Microphone Voice-to-Text Button */}
+        {/* Workspace Mode & Control Strip */}
+        <div className="px-4 lg:px-6 py-2 border-b border-[#24324A] bg-[#0F172A] flex flex-wrap items-center justify-between gap-3 shrink-0">
+          {/* Planning vs Live Trip Mode Segmented Switch */}
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="inline-flex border border-[#24324A] rounded-md overflow-hidden text-xs">
               <button
                 type="button"
-                onClick={toggleListening}
-                disabled={isLoading}
-                title={isListening ? "Stop listening" : "Voice-to-text input (Speak to TripBuddy)"}
-                className={`p-2 rounded-lg transition cursor-pointer flex items-center justify-center ${
-                  isListening
-                    ? 'bg-rose-600 hover:bg-rose-500 text-white ring-2 ring-rose-400/60 shadow-lg animate-pulse'
-                    : 'bg-slate-700/80 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-600/60'
+                onClick={() => handleModeChange('planning')}
+                className={`px-3 py-1 font-medium transition whitespace-nowrap cursor-pointer ${
+                  activeTrip.mode === 'planning'
+                    ? 'bg-cyan-500/20 text-cyan-200'
+                    : 'bg-[#0B1120] text-slate-400 hover:text-slate-200'
                 }`}
               >
-                {isListening ? (
-                  <MicOff className="w-4 h-4 text-white" />
-                ) : (
-                  <Mic className="w-4 h-4" />
-                )}
+                Planning Mode
               </button>
-
-              {/* Send Button */}
               <button
                 type="button"
-                onClick={() => handleSendPrompt()}
-                disabled={isLoading || !input.trim()}
-                title="Send message"
-                className="p-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 disabled:opacity-50 text-white transition cursor-pointer flex items-center justify-center"
+                onClick={() => handleModeChange('live')}
+                className={`px-3 py-1 border-l border-[#24324A] font-medium transition whitespace-nowrap cursor-pointer ${
+                  activeTrip.mode === 'live'
+                    ? 'bg-emerald-500/20 text-emerald-300'
+                    : 'bg-[#0B1120] text-slate-400 hover:text-slate-200'
+                }`}
               >
-                <Send className="w-4 h-4" />
+                Live Trip Mode
               </button>
             </div>
+
+            <span className="text-xs text-slate-400 font-mono tabular-nums hidden xl:inline truncate max-w-[420px]">
+              {tripSummaryLine}
+            </span>
           </div>
-          <p className="text-[11px] text-center text-slate-500 mt-2">
-            TripBuddy provides realistic estimates. Always verify actual airline and accommodation availability before booking.
-          </p>
+
+          {/* Right Controls: AI Local Friend, Model Selector, Export PDF */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={handleToggleLocalFriend}
+              className={`px-2.5 py-1 rounded-md border text-xs font-medium transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
+                activeTrip.localFriendMode
+                  ? 'border-amber-500/50 bg-amber-500/15 text-amber-300'
+                  : 'border-[#24324A] bg-[#0B1120] text-slate-400 hover:text-slate-200'
+              }`}
+              title="Switch AI tone & search into Local Resident mode"
+            >
+              <Coffee className="w-3.5 h-3.5" />
+              <span>Local Friend: {activeTrip.localFriendMode ? 'On' : 'Off'}</span>
+            </button>
+
+            <select
+              value={selectedModel}
+              onChange={(e) => setSelectedModel(e.target.value as AIProviderId)}
+              aria-label="Select AI Model"
+              className="px-2.5 py-1 rounded-md border border-[#24324A] bg-[#0B1120] text-xs text-slate-200 font-mono focus:border-cyan-500/60 focus:outline-none cursor-pointer"
+            >
+              {availableModels.map((m) => (
+                <option key={m.id} value={m.id} className="bg-[#0F172A]">
+                  {m.label}
+                </option>
+              ))}
+            </select>
+
+            <button
+              type="button"
+              onClick={() => window.print()}
+              className="px-2.5 py-1 rounded-md border border-[#24324A] bg-[#0B1120] hover:border-slate-500 text-xs text-slate-300 hover:text-white transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+              title="Export trip plan as PDF"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Export PDF</span>
+            </button>
+          </div>
         </div>
-      </main>
-    </div>
+
+        {/* Mobile Tab Switcher */}
+        <div className="md:hidden px-3 py-2 border-b border-[#24324A] bg-[#0B1120] flex items-center justify-between gap-2 shrink-0">
+          <div className="inline-flex border border-[#24324A] rounded-md overflow-hidden text-xs">
+            <button
+              type="button"
+              onClick={() => setMobilePane('chat')}
+              className={`px-3 py-1 font-medium ${
+                mobilePane === 'chat' ? 'bg-cyan-500/20 text-cyan-200' : 'text-slate-400'
+              }`}
+            >
+              AI Chat
+            </button>
+            <button
+              type="button"
+              onClick={() => setMobilePane('cockpit')}
+              className={`px-3 py-1 border-l border-[#24324A] font-medium ${
+                mobilePane === 'cockpit' ? 'bg-cyan-500/20 text-cyan-200' : 'text-slate-400'
+              }`}
+            >
+              Cockpit
+            </button>
+          </div>
+
+          <select
+            value={activeTab}
+            onChange={(e) => {
+              setActiveTab(e.target.value as CockpitTab);
+              setMobilePane('cockpit');
+            }}
+            className="px-2.5 py-1 rounded-md bg-[#131C2E] border border-[#24324A] text-xs text-slate-200"
+          >
+            {navItems.map((n) => (
+              <option key={n.id} value={n.id}>
+                {n.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Split-View Main Workspace */}
+        <main className="flex-1 min-h-0 grid grid-cols-1 md:grid-cols-12 overflow-hidden">
+          {/* Left Pane: Conversational AI Co-Pilot */}
+          <div
+            className={`md:col-span-5 h-full min-h-0 ${
+              mobilePane === 'chat' ? 'block' : 'hidden md:block'
+            }`}
+          >
+            <ChatPane
+              messages={activeTrip.messages}
+              mode={activeTrip.mode}
+              localFriendMode={activeTrip.localFriendMode}
+              isLoading={isChatLoading}
+              error={errorMsg}
+              onSendMessage={handleSendMessage}
+              onDismissError={() => setErrorMsg(null)}
+            />
+          </div>
+
+          {/* Right Pane: Interactive Travel Cockpit */}
+          <section
+            className={`md:col-span-7 h-full min-h-0 overflow-y-auto bg-[#0B1120] p-4 lg:p-5 ${
+              mobilePane === 'cockpit' ? 'block' : 'hidden md:block'
+            }`}
+          >
+            <div className="max-w-4xl mx-auto">
+              {activeTab === 'itinerary' && (
+                <ItineraryMapPanel
+                  trip={activeTrip}
+                  isBusy={isChatLoading || isPanelBusy}
+                  onUpdatePace={handleUpdatePace}
+                  onReoptimizeForPace={handleReoptimizeForPace}
+                  onToggleStopCompleted={handleToggleStopCompleted}
+                  onDeleteStop={handleDeleteStop}
+                  onTriggerPlanB={handleTriggerPlanBFromStop}
+                  onRemoveCustomSection={handleRemoveCustomSection}
+                  onAskStarter={(prompt) => {
+                    setMobilePane('chat');
+                    handleSendMessage(prompt);
+                  }}
+                />
+              )}
+
+              {activeTab === 'live' && (
+                <LiveCompanionPanel
+                  trip={activeTrip}
+                  isBusy={isChatLoading || isPanelBusy}
+                  planBTarget={planBTarget}
+                  planBResults={planBResults}
+                  planBNote={planBNote}
+                  onClearPlanBTarget={() => setPlanBTarget(null)}
+                  onFetchWeather={handleFetchWeather}
+                  onAdaptWeather={handleAdaptWeather}
+                  onGetLiveSuggestions={handleGetLiveSuggestions}
+                  onAddLiveSuggestionToDay={handleAddLiveSuggestionToDay}
+                  onRunPlanB={handleRunPlanB}
+                  onApplyPlanBSwap={handleApplyPlanBSwap}
+                  onUpdateLiveLocation={(liveLocation) =>
+                    updateActiveTrip((t) => ({ ...t, liveLocation }))
+                  }
+                />
+              )}
+
+              {activeTab === 'budget' && (
+                <BudgetRealityPanel
+                  trip={activeTrip}
+                  isBusy={isChatLoading || isPanelBusy}
+                  onUpdateBudgetMeta={handleUpdateBudgetMeta}
+                  onAddExpense={handleAddExpense}
+                  onDeleteExpense={handleDeleteExpense}
+                  onRunRealityCheck={handleRunRealityCheck}
+                  onApplySavingSwap={(prompt) => {
+                    setMobilePane('chat');
+                    handleSendMessage(prompt);
+                  }}
+                />
+              )}
+
+              {activeTab === 'group' && (
+                <GroupDecisionPanel
+                  trip={activeTrip}
+                  isBusy={isChatLoading || isPanelBusy}
+                  onAddMember={handleAddGroupMember}
+                  onRemoveMember={handleRemoveGroupMember}
+                  onSynthesizeGroup={handleSynthesizeGroup}
+                />
+              )}
+
+              {activeTab === 'discover' && (
+                <DiscoverPanel
+                  trip={activeTrip}
+                  isBusy={isChatLoading || isPanelBusy}
+                  onRunSurpriseMe={handleRunSurpriseMe}
+                  onLaunchSurpriseTrip={handleLaunchSurpriseTrip}
+                  onRunLocalGems={handleRunLocalGems}
+                  onToggleGemPin={handleToggleGemPin}
+                  onAddGemToDay={handleAddGemToDay}
+                />
+              )}
+            </div>
+          </section>
+        </main>
+      </div>
+
+      {/* Print-only PDF Dossier */}
+      <PrintableTripView trip={activeTrip} />
+    </>
   );
 }

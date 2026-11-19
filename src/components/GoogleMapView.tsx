@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   APIProvider,
   Map,
@@ -8,48 +8,58 @@ import {
   useMap,
 } from '@vis.gl/react-google-maps';
 import {
-  Navigation,
-  MapPin,
-  Hotel,
-  Coffee,
-  Mountain,
-  Camera,
-  Layers,
   RotateCcw,
   ExternalLink,
   Compass,
-  Sparkles,
-  ChevronRight,
+  MapPin,
 } from 'lucide-react';
-import { ItineraryLocation, ParsedTripDetails } from '../types';
+import { HiddenGemItem, ItineraryDay, ItineraryStop, LiveSuggestion } from '../types';
+import { formatMoney } from '../lib/storage';
 
-interface GoogleMapViewProps {
-  locations?: ItineraryLocation[];
-  destination?: string;
-  origin?: string;
-  duration?: number;
-  itineraryText?: string;
-  locationData?: ParsedTripDetails['location_data'];
-  originLocationData?: ParsedTripDetails['origin_location_data'];
-  apiKey?: string;
+export interface MapPinPoint {
+  id: string;
+  title: string;
+  day?: number;
+  timeWindow?: string;
+  neighborhood?: string;
+  description: string;
+  category: string;
+  indoorOutdoor?: string;
+  estimatedCost?: number;
+  lat: number;
+  lon: number;
+  kind: 'stop' | 'gem' | 'live' | 'hub';
 }
 
-// Polyline Route renderer inside the Map context
+interface GoogleMapViewProps {
+  destination: string;
+  country?: string;
+  centerLat?: number;
+  centerLon?: number;
+  days: ItineraryDay[];
+  hiddenGems?: HiddenGemItem[];
+  liveSuggestions?: LiveSuggestion[];
+  userLocation?: { lat: number; lon: number; label: string } | null;
+  currency?: string;
+  currencySymbol?: string;
+  focusedPinId?: string | null;
+  onSelectPin?: (pinId: string | null) => void;
+  compact?: boolean;
+}
+
 const RoutePolyline: React.FC<{ coordinates: google.maps.LatLngLiteral[] }> = ({ coordinates }) => {
   const map = useMap();
 
   useEffect(() => {
     if (!map || coordinates.length < 2) return;
-
     const polyline = new google.maps.Polyline({
       path: coordinates,
       geodesic: true,
-      strokeColor: '#6366f1',
-      strokeOpacity: 0.85,
-      strokeWeight: 4,
+      strokeColor: '#22D3EE',
+      strokeOpacity: 0.75,
+      strokeWeight: 3,
       map,
     });
-
     return () => {
       polyline.setMap(null);
     };
@@ -58,54 +68,60 @@ const RoutePolyline: React.FC<{ coordinates: google.maps.LatLngLiteral[] }> = ({
   return null;
 };
 
-// Camera Controller for Fit Bounds
 const CameraController: React.FC<{
-  locations: ItineraryLocation[];
-  selectedLocation: ItineraryLocation | null;
+  pins: MapPinPoint[];
+  selectedPin: MapPinPoint | null;
   triggerFit: number;
-}> = ({ locations, selectedLocation, triggerFit }) => {
+}> = ({ pins, selectedPin, triggerFit }) => {
   const map = useMap();
 
-  // Focus selected stop
   useEffect(() => {
-    if (!map || !selectedLocation) return;
-    map.panTo({ lat: selectedLocation.lat, lng: selectedLocation.lon });
-    if (map.getZoom() && map.getZoom()! < 12) {
-      map.setZoom(13);
+    if (!map || !selectedPin) return;
+    map.panTo({ lat: selectedPin.lat, lng: selectedPin.lon });
+    const currentZoom = map.getZoom();
+    if (!currentZoom || currentZoom < 13) {
+      map.setZoom(14);
     }
-  }, [map, selectedLocation]);
+  }, [map, selectedPin]);
 
-  // Fit all stops
   useEffect(() => {
-    if (!map || locations.length === 0) return;
+    if (!map || pins.length === 0) return;
+    if (pins.length === 1) {
+      map.setCenter({ lat: pins[0].lat, lng: pins[0].lon });
+      map.setZoom(12);
+      return;
+    }
     const bounds = new google.maps.LatLngBounds();
-    locations.forEach((loc) => {
-      bounds.extend({ lat: loc.lat, lng: loc.lon });
-    });
-    map.fitBounds(bounds, { top: 60, right: 60, bottom: 60, left: 60 });
-  }, [map, locations, triggerFit]);
+    pins.forEach((p) => bounds.extend({ lat: p.lat, lng: p.lon }));
+    map.fitBounds(bounds, { top: 48, right: 48, bottom: 48, left: 48 });
+  }, [map, pins, triggerFit]);
 
   return null;
 };
 
 export const GoogleMapView: React.FC<GoogleMapViewProps> = ({
-  locations: inputLocations,
-  destination = 'Destination',
-  origin = 'Flexible',
-  duration = 5,
-  locationData,
-  originLocationData,
-  apiKey: propApiKey,
+  destination,
+  country,
+  centerLat,
+  centerLon,
+  days,
+  hiddenGems = [],
+  liveSuggestions = [],
+  userLocation,
+  currency = 'USD',
+  currencySymbol = '$',
+  focusedPinId,
+  onSelectPin,
+  compact = false,
 }) => {
   const [activeApiKey, setActiveApiKey] = useState<string>(
-    propApiKey || ((import.meta as any).env.VITE_GOOGLE_MAPS_API_KEY as string) || ''
+    ((import.meta as any).env?.VITE_GOOGLE_MAPS_API_KEY as string) || ''
   );
   const [selectedDay, setSelectedDay] = useState<number | 'all'>('all');
-  const [selectedCategory, setSelectedCategory] = useState<string>('all');
-  const [selectedLocation, setSelectedLocation] = useState<ItineraryLocation | null>(null);
+  const [showGems, setShowGems] = useState<boolean>(true);
+  const [selectedPin, setSelectedPin] = useState<MapPinPoint | null>(null);
   const [fitTrigger, setFitTrigger] = useState(0);
 
-  // Fetch API key dynamically from server if not in env
   useEffect(() => {
     if (!activeApiKey) {
       fetch('/api/maps-key')
@@ -117,359 +133,315 @@ export const GoogleMapView: React.FC<GoogleMapViewProps> = ({
     }
   }, [activeApiKey]);
 
-  // Build structured locations list
-  const locations: ItineraryLocation[] = useMemo(() => {
-    if (inputLocations && inputLocations.length > 0) {
-      return inputLocations;
+  const allPins = useMemo<MapPinPoint[]>(() => {
+    const list: MapPinPoint[] = [];
+
+    for (const day of days) {
+      for (const stop of day.stops || []) {
+        if (typeof stop.lat === 'number' && typeof stop.lon === 'number') {
+          list.push({
+            id: stop.id,
+            title: stop.title,
+            day: day.day,
+            timeWindow: stop.timeWindow,
+            neighborhood: stop.neighborhood,
+            description: stop.description,
+            category: stop.category,
+            indoorOutdoor: stop.indoorOutdoor,
+            estimatedCost: stop.estimatedCost,
+            lat: stop.lat,
+            lon: stop.lon,
+            kind: 'stop',
+          });
+        }
+      }
     }
 
-    const centerLat = locationData?.lat ? parseFloat(locationData.lat) : 26.9124;
-    const centerLon = locationData?.lon ? parseFloat(locationData.lon) : 75.7873;
-
-    const list: ItineraryLocation[] = [];
-
-    // 1. Origin marker if specified and geocoded
-    if (origin && origin !== 'Flexible' && origin !== 'Delhi' && originLocationData?.lat) {
-      list.push({
-        id: 'loc-origin',
-        name: `Departure: ${origin}`,
-        day: 1,
-        category: 'origin',
-        timeOfDay: 'transit',
-        description: `Starting city for this trip. Departure towards ${destination}.`,
-        lat: parseFloat(originLocationData.lat),
-        lon: parseFloat(originLocationData.lon),
-      });
+    for (const gem of hiddenGems) {
+      if (gem.pinnedOnMap && typeof gem.lat === 'number' && typeof gem.lon === 'number') {
+        list.push({
+          id: gem.id,
+          title: gem.title,
+          neighborhood: gem.neighborhood,
+          description: gem.whyLocalsLoveIt,
+          category: 'hidden-gem',
+          estimatedCost: gem.estimatedCost,
+          lat: gem.lat,
+          lon: gem.lon,
+          kind: 'gem',
+        });
+      }
     }
 
-    // 2. Destination Center base marker
-    list.push({
-      id: 'loc-dest',
-      name: `${destination} City Center & Base`,
-      day: 1,
-      category: 'stay',
-      timeOfDay: 'stay',
-      description: `Central hub in ${destination}. Easy connection to top attractions, local food, and cultural walks.`,
-      lat: centerLat,
-      lon: centerLon,
-    });
+    for (const live of liveSuggestions) {
+      if (typeof live.lat === 'number' && typeof live.lon === 'number') {
+        list.push({
+          id: live.id,
+          title: live.title,
+          neighborhood: live.neighborhood,
+          description: live.whyNow,
+          category: live.category,
+          indoorOutdoor: live.indoorOutdoor,
+          estimatedCost: live.estimatedCost,
+          lat: live.lat,
+          lon: live.lon,
+          kind: 'live',
+        });
+      }
+    }
 
-    // 3. Day-by-day key sights
-    const templates = [
-      { name: 'Heritage Palace & Cultural Quarter', cat: 'attraction', desc: 'Historic royal architecture, intricate carvings, and museum courtyards.', offset: [-0.015, 0.02], time: 'morning' },
-      { name: 'Panoramic Hilltop Viewpoint', cat: 'viewpoint', desc: 'Elevated scenic overlook with panoramic sunset photography views.', offset: [0.03, -0.025], time: 'afternoon' },
-      { name: 'Old Bazaar & Artisan Eateries', cat: 'cafe', desc: 'Vibrant local food street, traditional crafts, tea stalls, and textiles.', offset: [-0.02, -0.015], time: 'evening' },
-      { name: 'Historic Stepwell & Water Garden', cat: 'attraction', desc: 'Ancient geometric stepwell structure with tranquil water gardens.', offset: [0.035, 0.03], time: 'morning' },
-      { name: 'Serene Botanical Grove & Lake Walk', cat: 'nature', desc: 'Lakeside promenade, botanical flora, and peaceful walking trails.', offset: [0.01, 0.04], time: 'afternoon' },
-      { name: 'Cultural Arts & Twilight Market', cat: 'attraction', desc: 'Acoustic music performances, local delicacies, and illuminated courtyards.', offset: [-0.03, 0.01], time: 'evening' },
-    ];
-
-    const count = Math.min(Math.max(duration, 3), 7);
-    for (let d = 1; d <= count; d++) {
-      const t = templates[(d - 1) % templates.length];
+    if (list.length === 0 && typeof centerLat === 'number' && typeof centerLon === 'number') {
       list.push({
-        id: `loc-day-${d}`,
-        name: `Day ${d}: ${t.name}`,
-        day: d,
-        category: t.cat as any,
-        timeOfDay: t.time as any,
-        description: t.desc,
-        lat: centerLat + t.offset[0] * (0.8 + d * 0.1),
-        lon: centerLon + t.offset[1] * (0.8 + d * 0.1),
+        id: 'hub-center',
+        title: [destination, country].filter(Boolean).join(', ') || 'Destination Hub',
+        description: 'Primary destination hub. Add itinerary stops or local hidden gems to populate route pins.',
+        category: 'hub',
+        lat: centerLat,
+        lon: centerLon,
+        kind: 'hub',
       });
     }
 
     return list;
-  }, [inputLocations, destination, origin, duration, locationData, originLocationData]);
+  }, [days, hiddenGems, liveSuggestions, centerLat, centerLon, destination, country]);
 
-  // Filtered locations
-  const filteredLocations = useMemo(() => {
-    return locations.filter((loc) => {
-      const matchDay = selectedDay === 'all' || loc.day === selectedDay || loc.category === 'origin';
-      const matchCat =
-        selectedCategory === 'all' ||
-        (selectedCategory === 'stays' && loc.category === 'stay') ||
-        (selectedCategory === 'sights' && (loc.category === 'attraction' || loc.category === 'viewpoint')) ||
-        (selectedCategory === 'food' && loc.category === 'cafe') ||
-        (selectedCategory === 'nature' && loc.category === 'nature');
-      return matchDay && matchCat;
+  const visiblePins = useMemo(() => {
+    return allPins.filter((pin) => {
+      if (pin.kind === 'gem' && !showGems) return false;
+      if (pin.kind === 'stop' && selectedDay !== 'all' && pin.day !== selectedDay) return false;
+      return true;
     });
-  }, [locations, selectedDay, selectedCategory]);
+  }, [allPins, selectedDay, showGems]);
 
-  // Polyline coordinates
-  const polylineCoords: google.maps.LatLngLiteral[] = useMemo(() => {
-    return filteredLocations.map((l) => ({ lat: l.lat, lng: l.lon }));
-  }, [filteredLocations]);
+  // Sync external focus
+  useEffect(() => {
+    if (!focusedPinId) return;
+    const match = allPins.find((p) => p.id === focusedPinId);
+    if (match) {
+      setSelectedPin(match);
+    }
+  }, [focusedPinId, allPins]);
 
-  const centerLat = locationData?.lat ? parseFloat(locationData.lat) : 26.9124;
-  const centerLon = locationData?.lon ? parseFloat(locationData.lon) : 75.7873;
+  const routeCoords = useMemo<google.maps.LatLngLiteral[]>(() => {
+    return visiblePins
+      .filter((p) => p.kind === 'stop')
+      .map((p) => ({ lat: p.lat, lng: p.lon }));
+  }, [visiblePins]);
 
-  const getPinColor = (cat: string) => {
-    switch (cat) {
-      case 'origin':
-        return { bg: '#3b82f6', border: '#1e3a8a', glyph: '#ffffff' };
+  const defaultCenter = useMemo(() => {
+    if (typeof centerLat === 'number' && typeof centerLon === 'number') {
+      return { lat: centerLat, lng: centerLon };
+    }
+    if (visiblePins[0]) {
+      return { lat: visiblePins[0].lat, lng: visiblePins[0].lon };
+    }
+    return { lat: 38.7223, lng: -9.1393 };
+  }, [centerLat, centerLon, visiblePins]);
+
+  const getPinStyle = (pin: MapPinPoint) => {
+    if (pin.kind === 'gem') return { bg: '#F59E0B', border: '#78350F', glyph: '#0B1120' };
+    if (pin.kind === 'live') return { bg: '#10B981', border: '#064E3B', glyph: '#0B1120' };
+    if (pin.kind === 'hub') return { bg: '#06B6D4', border: '#164E63', glyph: '#0B1120' };
+    switch (pin.category) {
+      case 'food':
+        return { bg: '#F59E0B', border: '#78350F', glyph: '#0B1120' };
       case 'stay':
-        return { bg: '#10b981', border: '#064e3b', glyph: '#ffffff' };
-      case 'cafe':
-        return { bg: '#f59e0b', border: '#78350f', glyph: '#ffffff' };
+        return { bg: '#10B981', border: '#064E3B', glyph: '#0B1120' };
       case 'nature':
-      case 'viewpoint':
-        return { bg: '#06b6d4', border: '#164e63', glyph: '#ffffff' };
+        return { bg: '#14B8A6', border: '#115E59', glyph: '#0B1120' };
       default:
-        return { bg: '#6366f1', border: '#312e81', glyph: '#ffffff' };
+        return { bg: '#22D3EE', border: '#0E7490', glyph: '#0B1120' };
     }
   };
 
-  const getCategoryIcon = (cat: string) => {
-    switch (cat) {
-      case 'origin':
-        return <Navigation className="w-3.5 h-3.5 text-blue-400" />;
-      case 'stay':
-        return <Hotel className="w-3.5 h-3.5 text-emerald-400" />;
-      case 'cafe':
-        return <Coffee className="w-3.5 h-3.5 text-amber-400" />;
-      case 'nature':
-        return <Mountain className="w-3.5 h-3.5 text-teal-400" />;
-      case 'viewpoint':
-        return <Camera className="w-3.5 h-3.5 text-cyan-400" />;
-      default:
-        return <MapPin className="w-3.5 h-3.5 text-indigo-400" />;
-    }
-  };
+  if (!activeApiKey) {
+    return (
+      <div className="w-full h-64 rounded-lg bg-[#131C2E] border border-[#24324A] flex flex-col items-center justify-center text-center px-6">
+        <Compass className="w-6 h-6 text-slate-500 mb-2" />
+        <p className="text-sm font-medium text-slate-300">Loading interactive route map</p>
+        <p className="text-xs text-slate-500 mt-1">Waiting for Google Maps configuration...</p>
+      </div>
+    );
+  }
 
   return (
-    <div className="w-full rounded-2xl bg-slate-900 border border-slate-700/80 shadow-2xl overflow-hidden flex flex-col">
-      {/* Header & Controls Toolbar */}
-      <div className="p-3.5 bg-slate-950/80 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-lg bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
-            <Compass className="w-4 h-4" />
-          </div>
-          <div>
-            <h4 className="text-sm font-bold text-white flex items-center gap-1.5">
-              <span>{destination} Interactive Route Map</span>
-              <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-medium">
-                Google Maps
-              </span>
-            </h4>
-            <p className="text-xs text-slate-400">
-              {origin && origin !== 'Flexible' ? `From ${origin} to ${destination}` : `${destination} highlights & day stops`}
-            </p>
-          </div>
+    <div className="w-full rounded-lg bg-[#131C2E] border border-[#24324A] overflow-hidden flex flex-col">
+      {/* Map Control Strip */}
+      <div className="px-3.5 py-2.5 bg-[#0F172A] border-b border-[#24324A] flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <MapPin className="w-4 h-4 text-cyan-400 shrink-0" />
+          <span className="text-xs font-semibold text-slate-100 truncate">
+            {destination ? `${destination} Route Map` : 'Global Trip Map'}
+          </span>
+          <span className="text-xs text-slate-500 font-mono tabular-nums">
+            · {visiblePins.length} {visiblePins.length === 1 ? 'pin' : 'pins'}
+          </span>
         </div>
 
-        {/* Action Controls */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {days.length > 0 && (
+            <div className="flex items-center border border-[#24324A] rounded-md overflow-hidden text-xs">
+              <button
+                type="button"
+                onClick={() => setSelectedDay('all')}
+                className={`px-2 py-1 transition cursor-pointer ${
+                  selectedDay === 'all'
+                    ? 'bg-cyan-500/20 text-cyan-300 font-medium'
+                    : 'bg-[#131C2E] text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                All
+              </button>
+              {days.map((d) => (
+                <button
+                  type="button"
+                  key={d.day}
+                  onClick={() => setSelectedDay(d.day)}
+                  className={`px-2 py-1 border-l border-[#24324A] transition font-mono tabular-nums cursor-pointer ${
+                    selectedDay === d.day
+                      ? 'bg-cyan-500/20 text-cyan-300 font-medium'
+                      : 'bg-[#131C2E] text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  D{d.day}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {hiddenGems.some((g) => g.pinnedOnMap) && (
+            <button
+              type="button"
+              onClick={() => setShowGems((v) => !v)}
+              className={`px-2.5 py-1 rounded-md text-xs border transition cursor-pointer ${
+                showGems
+                  ? 'border-amber-500/50 bg-amber-500/10 text-amber-300'
+                  : 'border-[#24324A] bg-[#131C2E] text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              Local Gems
+            </button>
+          )}
+
           <button
-            onClick={() => setFitTrigger((prev) => prev + 1)}
-            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-300 hover:text-white border border-slate-700 transition flex items-center gap-1.5 cursor-pointer shadow-sm"
-            title="Recenter and fit all stops into view"
+            type="button"
+            onClick={() => setFitTrigger((v) => v + 1)}
+            className="px-2.5 py-1 rounded-md text-xs border border-[#24324A] bg-[#131C2E] text-slate-300 hover:text-white hover:border-slate-500 transition flex items-center gap-1 cursor-pointer"
+            title="Recenter map to fit all stops"
           >
-            <RotateCcw className="w-3.5 h-3.5 text-indigo-400" />
-            <span>Fit Stops</span>
+            <RotateCcw className="w-3 h-3 text-cyan-400" />
+            <span>Fit</span>
           </button>
 
-          <a
-            href={`https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(origin === 'Flexible' ? destination : origin)}&destination=${encodeURIComponent(destination)}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white transition flex items-center gap-1.5 cursor-pointer shadow-sm"
-          >
-            <span>Google Maps</span>
-            <ExternalLink className="w-3 h-3" />
-          </a>
+          {destination && (
+            <a
+              href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([destination, country].filter(Boolean).join(', '))}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-2.5 py-1 rounded-md text-xs border border-[#24324A] bg-[#131C2E] text-slate-300 hover:text-cyan-300 transition flex items-center gap-1"
+            >
+              <span>Open Maps</span>
+              <ExternalLink className="w-3 h-3" />
+            </a>
+          )}
         </div>
       </div>
 
-      {/* Filter Chips Bar */}
-      <div className="px-3 py-2 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between gap-2 overflow-x-auto text-xs">
-        {/* Day selection */}
-        <div className="flex items-center gap-1 shrink-0">
-          <span className="text-[11px] text-slate-400 mr-1 font-medium">Day:</span>
-          <button
-            onClick={() => setSelectedDay('all')}
-            className={`px-2.5 py-1 rounded-md text-xs font-medium transition cursor-pointer ${
-              selectedDay === 'all'
-                ? 'bg-indigo-600 text-white shadow-sm'
-                : 'bg-slate-800 text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            All
-          </button>
-          {Array.from({ length: Math.min(duration, 7) }, (_, i) => i + 1).map((d) => (
-            <button
-              key={d}
-              onClick={() => setSelectedDay(d)}
-              className={`px-2 py-1 rounded-md text-xs font-medium transition cursor-pointer ${
-                selectedDay === d
-                  ? 'bg-indigo-600 text-white shadow-sm'
-                  : 'bg-slate-800 text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              D{d}
-            </button>
-          ))}
-        </div>
-
-        {/* Category selection */}
-        <div className="flex items-center gap-1 shrink-0">
-          <span className="text-[11px] text-slate-400 mr-1 font-medium">Category:</span>
-          {[
-            { id: 'all', label: 'All' },
-            { id: 'stays', label: 'Stays' },
-            { id: 'sights', label: 'Sights' },
-            { id: 'food', label: 'Food' },
-          ].map((cat) => (
-            <button
-              key={cat.id}
-              onClick={() => setSelectedCategory(cat.id)}
-              className={`px-2 py-1 rounded-md text-xs font-medium transition cursor-pointer ${
-                selectedCategory === cat.id
-                  ? 'bg-slate-700 text-white shadow-sm'
-                  : 'bg-slate-800/60 text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              {cat.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Main Google Map Container */}
-      <div className="relative w-full h-[460px] bg-slate-950">
+      {/* Map Viewport */}
+      <div className={`relative w-full ${compact ? 'h-64' : 'h-80'} bg-[#0B1120]`}>
         <APIProvider apiKey={activeApiKey} solutionChannel="gmp_mcp_codeassist_v1_aistudio">
           <Map
-            id="tripbuddy-interactive-map"
+            id="tripbuddy-cockpit-map"
             mapId="DEMO_MAP_ID"
             internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
-            defaultCenter={{ lat: centerLat, lng: centerLon }}
-            defaultZoom={11}
+            defaultCenter={defaultCenter}
+            defaultZoom={12}
             gestureHandling="greedy"
-            disableDefaultUI={false}
             fullscreenControl={true}
-            streetViewControl={true}
-            mapTypeControl={true}
+            streetViewControl={false}
+            mapTypeControl={false}
             className="w-full h-full"
           >
-            {/* Camera & Bounds sync */}
             <CameraController
-              locations={filteredLocations}
-              selectedLocation={selectedLocation}
+              pins={visiblePins}
+              selectedPin={selectedPin}
               triggerFit={fitTrigger}
             />
 
-            {/* Polyline Route connecting itinerary stops */}
-            {polylineCoords.length >= 2 && <RoutePolyline coordinates={polylineCoords} />}
+            {routeCoords.length >= 2 && <RoutePolyline coordinates={routeCoords} />}
 
-            {/* Advanced Markers */}
-            {filteredLocations.map((loc) => {
-              const colors = getPinColor(loc.category);
-              const isSelected = selectedLocation?.id === loc.id;
+            {userLocation && (
+              <AdvancedMarker
+                position={{ lat: userLocation.lat, lng: userLocation.lon }}
+                title={`Your Location: ${userLocation.label}`}
+                zIndex={120}
+              >
+                <Pin background="#38BDF8" borderColor="#0C4A6E" glyphColor="#0B1120" scale={1.15} />
+              </AdvancedMarker>
+            )}
 
+            {visiblePins.map((pin) => {
+              const style = getPinStyle(pin);
+              const isSelected = selectedPin?.id === pin.id;
               return (
                 <AdvancedMarker
-                  key={loc.id}
-                  position={{ lat: loc.lat, lng: loc.lon }}
-                  onClick={() => setSelectedLocation(loc)}
-                  title={loc.name}
-                  zIndex={isSelected ? 100 : loc.category === 'origin' ? 50 : 10}
+                  key={pin.id}
+                  position={{ lat: pin.lat, lng: pin.lon }}
+                  onClick={() => {
+                    setSelectedPin(pin);
+                    onSelectPin?.(pin.id);
+                  }}
+                  title={pin.title}
+                  zIndex={isSelected ? 100 : pin.kind === 'gem' ? 40 : 20}
                 >
                   <Pin
-                    background={colors.bg}
-                    borderColor={colors.border}
-                    glyphColor={colors.glyph}
-                    scale={isSelected ? 1.35 : loc.category === 'origin' ? 1.25 : 1.05}
+                    background={style.bg}
+                    borderColor={style.border}
+                    glyphColor={style.glyph}
+                    scale={isSelected ? 1.3 : 1.0}
                   />
                 </AdvancedMarker>
               );
             })}
 
-            {/* InfoWindow on Marker Click */}
-            {selectedLocation && (
+            {selectedPin && (
               <InfoWindow
-                position={{ lat: selectedLocation.lat, lng: selectedLocation.lon }}
-                onCloseClick={() => setSelectedLocation(null)}
+                position={{ lat: selectedPin.lat, lng: selectedPin.lon }}
+                onCloseClick={() => {
+                  setSelectedPin(null);
+                  onSelectPin?.(null);
+                }}
                 headerContent={
-                  <div className="font-bold text-xs text-slate-900 flex items-center gap-1.5">
-                    {getCategoryIcon(selectedLocation.category)}
-                    <span>{selectedLocation.name}</span>
+                  <div className="font-semibold text-xs text-slate-900">
+                    {selectedPin.title}
                   </div>
                 }
               >
-                <div className="text-slate-800 text-xs max-w-[240px] space-y-2 p-1 font-sans">
-                  <div className="flex items-center gap-1.5">
-                    <span className="px-1.5 py-0.5 rounded bg-slate-200 text-slate-700 font-semibold text-[10px] uppercase">
-                      {selectedLocation.category}
-                    </span>
-                    <span className="text-[11px] text-slate-500">Day {selectedLocation.day}</span>
+                <div className="text-slate-800 text-xs max-w-[230px] space-y-1.5 font-sans">
+                  <div className="text-[11px] text-slate-500">
+                    {[
+                      selectedPin.day ? `Day ${selectedPin.day}` : selectedPin.kind === 'gem' ? 'Local Gem' : 'Nearby',
+                      selectedPin.neighborhood,
+                      selectedPin.estimatedCost ? formatMoney(selectedPin.estimatedCost, currency, currencySymbol) : null,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')}
                   </div>
-
-                  <p className="text-slate-600 leading-snug">{selectedLocation.description}</p>
-
-                  <div className="pt-1 border-t border-slate-200 flex items-center justify-between">
-                    <a
-                      href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(selectedLocation.name + ' ' + destination)}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-indigo-600 hover:text-indigo-800 font-semibold text-[11px] inline-flex items-center gap-1"
-                    >
-                      <span>Explore on Maps</span>
-                      <ExternalLink className="w-3 h-3" />
-                    </a>
-                  </div>
+                  <p className="text-slate-700 leading-snug">{selectedPin.description}</p>
+                  <a
+                    href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${selectedPin.title} ${destination}`)}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-cyan-700 hover:text-cyan-900 font-semibold text-[11px] pt-1"
+                  >
+                    <span>Directions in Google Maps</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
                 </div>
               </InfoWindow>
             )}
           </Map>
         </APIProvider>
-      </div>
-
-      {/* Interactive Stops Strip (Click to fly & view) */}
-      <div className="p-3 bg-slate-950 border-t border-slate-800/80">
-        <div className="flex items-center justify-between mb-2">
-          <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
-            <Sparkles className="w-3 h-3 text-indigo-400" />
-            Curated Trip Stops ({filteredLocations.length})
-          </span>
-          <span className="text-[11px] text-slate-500">Click stop to focus</span>
-        </div>
-
-        <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-thin">
-          {filteredLocations.map((loc) => {
-            const isSelected = selectedLocation?.id === loc.id;
-            return (
-              <button
-                key={loc.id}
-                onClick={() => setSelectedLocation(loc)}
-                className={`p-2 rounded-xl text-left border transition shrink-0 w-48 cursor-pointer flex flex-col justify-between ${
-                  isSelected
-                    ? 'bg-indigo-950/70 border-indigo-500/80 shadow-md ring-1 ring-indigo-500/50'
-                    : 'bg-slate-900/80 hover:bg-slate-800/90 border-slate-800 hover:border-slate-700'
-                }`}
-              >
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-[10px] font-medium text-indigo-300 flex items-center gap-1">
-                      {getCategoryIcon(loc.category)}
-                      Day {loc.day}
-                    </span>
-                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 uppercase">
-                      {loc.category}
-                    </span>
-                  </div>
-                  <div className="text-xs font-semibold text-white line-clamp-1">{loc.name}</div>
-                  <div className="text-[11px] text-slate-400 line-clamp-2 mt-0.5 leading-relaxed">
-                    {loc.description}
-                  </div>
-                </div>
-                <div className="mt-2 text-[10px] text-indigo-400 font-medium flex items-center gap-0.5">
-                  <span>View Details</span>
-                  <ChevronRight className="w-2.5 h-2.5" />
-                </div>
-              </button>
-            );
-          })}
-        </div>
       </div>
     </div>
   );
